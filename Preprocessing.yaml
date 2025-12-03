@@ -36,7 +36,7 @@ implementation:
           from PIL import Image, ImageOps
           from sklearn.preprocessing import LabelEncoder
           
-          print('🔧 Starting UI Component Preprocessing for Vanilla GAN')
+          print(' Starting UI Component Preprocessing for Vanilla GAN')
           print('=' * 60)
           
           # Parse arguments
@@ -255,7 +255,7 @@ implementation:
           }
           
           # Save processed datasets
-          print('💾 Saving processed datasets...')
+          print(' Saving processed datasets...')
           
           os.makedirs(os.path.dirname(processed_train_path) or '.', exist_ok=True)
           with open(processed_train_path, 'wb') as f:
