@@ -36,7 +36,7 @@ from torch.utils.data import Dataset, DataLoader
 from PIL import Image, ImageOps
 from sklearn.preprocessing import LabelEncoder
 
-print(' Starting UI Component Preprocessing for Vanilla GAN')
+print('🔧 Starting UI Component Preprocessing for Vanilla GAN')
 print('=' * 60)
 # Parse arguments
 train_data_path = sys.argv[1]
@@ -332,7 +332,7 @@ print(f'  Classes: {len(label_encoder.classes_)} ({list(label_encoder.classes_)}
 print(f'  Target size: {target_width}x{target_height}x{channels}')
 print(f'  Training algorithm: {vanilla_gan_config[\"training_algorithm\"]}')
 print(f'  Device: {vanilla_gan_config[\"device\"]}')
-print(' Files saved successfully')
+print( Files saved successfully')
 " \"\$0\" \"\$1\" \"\$2\" \"\$3\" \"\$4\" \"\$5\" \"\$6\" \"\$7\"
     args:
       - {inputPath: train_data}
