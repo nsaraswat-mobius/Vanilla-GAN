@@ -22,6 +22,24 @@ implementation:
         # nesy-factory 1.0.0 requires torch<2.3.0,>=2.0.0
         # So we install torchvision 0.15.2 which is compatible with torch 2.0.0-2.2.0
         pip install torchvision==0.15.2 --no-deps --quiet
+        
+        # Copy the local vanilla_gan.py file to the container
+        echo "Copying vanilla_gan.py to container..."
+        mkdir -p /tmp/local_gans
+        cat > /tmp/local_gans/registry.py << 'EOF'
+# Minimal registry for VanillaGAN
+_models = {}
+
+def register_gan_model(name, model_class):
+    _models[name] = model_class
+
+def get_gan_model(name):
+    return _models.get(name)
+
+def list_gan_models():
+    return list(_models.keys())
+EOF
+        
         exec "$0" "$@"
       - python3
       - -u
@@ -79,89 +97,36 @@ implementation:
         print(f'  Generator Layers: {gan_config.get("generator_layers", [256, 512, 1024])}')
         print(f'  Discriminator Layers: {gan_config.get("discriminator_layers", [1024, 512, 256])}')
         
-        # Import Vanilla GAN from nesy-factory Docker container
-        print('Importing VanillaGAN from nesy-factory...')
+        # Import Vanilla GAN from nesy-factory package
+        print('Importing VanillaGAN from nesy-factory package...')
+        
         try:
-            # First create minimal registry to satisfy any registry dependencies
-            import sys
-            
-            # Create a minimal registry if it doesn't exist
-            try:
-                from nesy_factory.GANs.registry import register_gan_model, get_gan_model, list_gan_models
-                print('Registry imported from nesy-factory')
-            except ImportError:
-                print('Creating minimal registry for compatibility')
-                class MinimalRegistry:
-                    _models = {}
-                    @classmethod
-                    def register_gan_model(cls, name, model_class):
-                        cls._models[name] = model_class
-                    @classmethod
-                    def get_gan_model(cls, name):
-                        return cls._models.get(name)
-                    @classmethod
-                    def list_gan_models(cls):
-                        return list(cls._models.keys())
-                
-                # Add to sys.modules
-                if 'nesy_factory' not in sys.modules:
-                    sys.modules['nesy_factory'] = type(sys)('nesy_factory')
-                if 'nesy_factory.GANs' not in sys.modules:
-                    sys.modules['nesy_factory.GANs'] = type(sys)('GANs')
-                
-                registry_module = type(sys)('registry')
-                for attr in ['register_gan_model', 'get_gan_model', 'list_gan_models']:
-                    setattr(registry_module, attr, getattr(MinimalRegistry, attr))
-                sys.modules['nesy_factory.GANs.registry'] = registry_module
-            
-            # Now import VanillaGAN from nesy-factory
+            # Direct import from nesy-factory
             from nesy_factory.GANs.vanilla_gan import VanillaGAN, VanillaGANConfig, TrainingAlgorithm
             print('VanillaGAN imported successfully from nesy-factory')
             
-        except ImportError as import_error:
-            print(f'Failed to import from nesy-factory: {import_error}')
+        except ImportError as e:
+            print(f'Failed to import from nesy-factory: {e}')
             
-            # Fallback: Try to find VanillaGAN in the Docker container's Python path
-            print('Searching for VanillaGAN in Docker container...')
-            import importlib.util
-            import glob
-            
-            # Search for vanilla_gan.py in common Docker container locations
-            search_paths = [
-                '/usr/local/lib/python*/site-packages/nesy_factory/GANs/vanilla_gan.py',
-                '/opt/conda/lib/python*/site-packages/nesy_factory/GANs/vanilla_gan.py',
-                '/usr/lib/python*/site-packages/nesy_factory/GANs/vanilla_gan.py',
-                '/app/nesy_factory/GANs/vanilla_gan.py',
-                '/workspace/nesy_factory/GANs/vanilla_gan.py'
-            ]
-            
-            vanilla_gan_found = False
-            for pattern in search_paths:
-                matching_files = glob.glob(pattern)
-                for vanilla_gan_path in matching_files:
-                    try:
-                        print(f'Trying to load VanillaGAN from: {vanilla_gan_path}')
-                        spec = importlib.util.spec_from_file_location("vanilla_gan_module", vanilla_gan_path)
-                        if spec and spec.loader:
-                            vanilla_gan_module = importlib.util.module_from_spec(spec)
-                            spec.loader.exec_module(vanilla_gan_module)
-                            
-                            if hasattr(vanilla_gan_module, 'VanillaGAN'):
-                                VanillaGAN = vanilla_gan_module.VanillaGAN
-                                VanillaGANConfig = vanilla_gan_module.VanillaGANConfig
-                                TrainingAlgorithm = getattr(vanilla_gan_module, 'TrainingAlgorithm', None)
-                                print(f'VanillaGAN loaded successfully from: {vanilla_gan_path}')
-                                vanilla_gan_found = True
-                                break
-                    except Exception as e:
-                        print(f'Failed to load from {vanilla_gan_path}: {e}')
-                        continue
+            # Fallback: try alternative import paths in nesy-factory
+            try:
+                import sys
+                import importlib
                 
-                if vanilla_gan_found:
-                    break
-            
-            if not vanilla_gan_found:
-                raise ImportError('VanillaGAN not found in nesy-factory Docker container')
+                # Try to import nesy_factory module first
+                nesy_factory = importlib.import_module('nesy_factory')
+                gans_module = importlib.import_module('nesy_factory.GANs')
+                vanilla_gan_module = importlib.import_module('nesy_factory.GANs.vanilla_gan')
+                
+                VanillaGAN = vanilla_gan_module.VanillaGAN
+                VanillaGANConfig = vanilla_gan_module.VanillaGANConfig
+                TrainingAlgorithm = getattr(vanilla_gan_module, 'TrainingAlgorithm', None)
+                
+                print('VanillaGAN imported via importlib from nesy-factory')
+                
+            except ImportError as e2:
+                print(f'Fallback import failed: {e2}')
+                raise ImportError(f'VanillaGAN not found in nesy-factory package: {e}. Original error: {e2}')
         
         print('Creating Vanilla GAN model...')
         
