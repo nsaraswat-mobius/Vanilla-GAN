@@ -1,9 +1,9 @@
-name: Initialize Vanilla GAN Model
-description: Initializes Vanilla GAN model with multiple training algorithm support for UI component generation.
+name: Initialize GAN Model
+description: Initializes GAN based on configuration.
 inputs:
   - name: gan_config
     type: String
-    description: "Vanilla GAN configuration from preprocessing step"
+    description: "GAN configuration
 outputs:
   - name: model
     type: Model
@@ -35,12 +35,12 @@ implementation:
         parser.add_argument('--init_config_path', type=str, required=True)
         args = parser.parse_args()
         
-        print('Starting Vanilla GAN Model Initialization')
+        print('Starting GAN Model Initialization')
         
-        # Parse Vanilla GAN configuration
+        # Parse GAN configuration
         gan_config_str = args.gan_config
-        print(f'Vanilla GAN config received, length: {len(gan_config_str)}')
-        print(f'Config preview: {gan_config_str[:100]}...')
+        print(f'GAN config received, length: {len(gan_config_str)}')
+        print(f'GAN Config preview: {gan_config_str[:100]}...')
         
         try:
             gan_config = json.loads(gan_config_str)
@@ -58,156 +58,142 @@ implementation:
                 print(f'Failed to parse config after cleaning: {e2}')
                 raise ValueError("Invalid JSON configuration")
         
-        # Verify or set model type for Vanilla GAN
-        model_type = gan_config.get('model_type', '').lower()
-        if not model_type:
-            # If model_type is missing, assume vanilla_gan since this is the vanilla GAN initializer
-            model_type = 'vanilla_gan'
-            gan_config['model_type'] = 'vanilla_gan'
-            print('Model type not specified, defaulting to vanilla_gan')
-        elif model_type != 'vanilla_gan':
-            print(f'Warning: Expected vanilla_gan model type, got: {model_type}. Proceeding with vanilla_gan.')
-            model_type = 'vanilla_gan'
-            gan_config['model_type'] = 'vanilla_gan'
+        # Determine model type
+        model_type = gan_config.get('model_type', 'vanilla_gan').lower()
+        is_dcgan = model_type == 'dcgan'
+        is_vanilla_gan = model_type == 'vanilla_gan'
         
-        print('VANILLA GAN Configuration:')
-        print(f'  Input Dimension: {gan_config.get("input_dim", 784)}')
-        print(f'  Latent Dimension: {gan_config.get("latent_dim", 100)}')
-        print(f'  Image Size: {gan_config.get("image_size", 64)}')
+        if not (is_dcgan or is_vanilla_gan):
+            raise ValueError(f"Unknown model type: {model_type}. Must be 'dcgan' or 'vanilla_gan'")
+        
+        print(f'{model_type.upper()} Configuration:')
+        if is_vanilla_gan:
+            print(f'  Input Dimension: {gan_config.get("input_dim", 784)}')
+        else:
+            print(f'  Image Size: {gan_config.get("image_size", 64)}')
         print(f'  Channels: {gan_config.get("channels", 3)}')
+        print(f'  Latent Dim: {gan_config.get("latent_dim", 100)}')
         print(f'  Training Algorithm: {gan_config.get("training_algorithm", "backprop")}')
-        print(f'  Generator Layers: {gan_config.get("generator_layers", [256, 512, 1024])}')
-        print(f'  Discriminator Layers: {gan_config.get("discriminator_layers", [1024, 512, 256])}')
         
-        # Import Vanilla GAN from nesy-factory package
-        print('Importing VanillaGAN from nesy-factory package...')
+        # Import GAN models based on type
+        gan_model = None
         
-        try:
-            # Direct import from nesy-factory
-            from nesy_factory.GANs.vanilla_gan import VanillaGAN, VanillaGANConfig, TrainingAlgorithm
-            print('VanillaGAN imported successfully from nesy-factory')
-            
-        except ImportError as e:
-            print(f'Failed to import from nesy-factory: {e}')
-            
-            # Check if nesy_factory is available at all
+        if is_dcgan:
+            print('Importing DCGAN...')
             try:
-                import nesy_factory
-                print(f'nesy_factory found at: {nesy_factory.__file__}')
-                print(f'nesy_factory version: {getattr(nesy_factory, "__version__", "unknown")}')
+                from nesy_factory.GANs.dcgan import DCGAN, DCGANConfig
+                print('DCGAN imported successfully')
+            except ImportError as e:
+                print(f'DCGAN import error: {e}')
+                raise
+            
+            print('Creating DCGAN model...')
+            dcgan_config_dict = {
+                'image_size': gan_config.get('image_size', 64),
+                'channels': gan_config.get('channels', 3),
+                'latent_dim': gan_config.get('latent_dim', 100),
+                'training_algorithm': gan_config.get('training_algorithm', 'backprop'),
+                'use_forward_forward': gan_config.get('training_algorithm', '').lower() == 'forward_forward',
+                'use_cafo': gan_config.get('training_algorithm', '').lower() == 'cafo',
+                'batch_size': gan_config.get('batch_size', 32),
+                'learning_rate': gan_config.get('learning_rate', 0.0002),
+                'beta1': 0.5,
+                'epochs': gan_config.get('epochs', 50),
+                'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+            }
+            
+            if 'generator_layers' in gan_config and gan_config['generator_layers']:
+                dcgan_config_dict['generator_layers'] = gan_config['generator_layers']
+            
+            if 'discriminator_layers' in gan_config and gan_config['discriminator_layers']:
+                dcgan_config_dict['discriminator_layers'] = gan_config['discriminator_layers']
+            
+            print(f'DCGAN config: {dcgan_config_dict}')
+            
+            try:
+                dcgan_config = DCGANConfig(**dcgan_config_dict)
+                gan_model = DCGAN(dcgan_config)
+                print('DCGAN model created successfully')
+            except Exception as e:
+                print(f'Error creating DCGAN: {e}')
+                import traceback
+                traceback.print_exc()
+                raise
+        
+        elif is_vanilla_gan:
+            print('Importing VanillaGAN...')
+            try:
+                from nesy_factory.GANs.vanilla_gan import VanillaGAN, VanillaGANConfig
+                print('VanillaGAN imported successfully')
+            except ImportError as e:
+                print(f'VanillaGAN import error: {e}')
                 
-                # Try to see what's available in nesy_factory.GANs
+                # Check if nesy_factory is available at all
                 try:
-                    import nesy_factory.GANs as gans
-                    print(f'GANs module found: {dir(gans)}')
-                except ImportError as gans_error:
-                    print(f'GANs module not found: {gans_error}')
+                    import nesy_factory
+                    print(f'nesy_factory found at: {nesy_factory.__file__}')
+                    print(f'nesy_factory version: {getattr(nesy_factory, "__version__", "unknown")}')
+                    
+                    # Try to see what's available in nesy_factory.GANs
+                    try:
+                        import nesy_factory.GANs as gans
+                        print(f'GANs module found: {dir(gans)}')
+                    except ImportError as gans_error:
+                        print(f'GANs module not found: {gans_error}')
+                    
+                except ImportError:
+                    print('nesy_factory package not found in container')
                 
-            except ImportError:
-                print('nesy_factory package not found in container')
+                # Fallback: try alternative import methods
+                try:
+                    import importlib
+                    
+                    vanilla_gan_module = importlib.import_module('nesy_factory.GANs.vanilla_gan')
+                    
+                    VanillaGAN = vanilla_gan_module.VanillaGAN
+                    VanillaGANConfig = vanilla_gan_module.VanillaGANConfig
+                    
+                    print('VanillaGAN imported via importlib from nesy-factory')
+                    
+                except ImportError as e2:
+                    print(f'All import methods failed. Final error: {e2}')
+                    print('Available Python packages:')
+                    import pkg_resources
+                    installed_packages = [d.project_name for d in pkg_resources.working_set]
+                    print([pkg for pkg in installed_packages if 'nesy' in pkg.lower()])
+                    raise ImportError(f'VanillaGAN not available in nesy-factory Docker container')
             
-            # Fallback: try alternative import methods
+            print('Creating Vanilla GAN model...')
+            vanilla_config_dict = {
+                'input_dim': gan_config.get('input_dim', 784),
+                'latent_dim': gan_config.get('latent_dim', 100),
+                'training_algorithm': gan_config.get('training_algorithm', 'backprop'),
+                'use_forward_forward': gan_config.get('training_algorithm', '').lower() == 'forward_forward',
+                'use_cafo': gan_config.get('training_algorithm', '').lower() == 'cafo',
+                'generator_layers': gan_config.get('generator_layers', [256, 512, 1024]),
+                'discriminator_layers': gan_config.get('discriminator_layers', [1024, 512, 256]),
+                'batch_size': gan_config.get('batch_size', 32),
+                'lr': gan_config.get('learning_rate', 0.0002),
+                'beta1': gan_config.get('beta1', 0.5),
+                'beta2': gan_config.get('beta2', 0.999),
+                'epochs': gan_config.get('epochs', 100),
+                'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+            }
+            
+            print(f'Vanilla GAN config: {vanilla_config_dict}')
+            
             try:
-                import importlib
-                
-                vanilla_gan_module = importlib.import_module('nesy_factory.GANs.vanilla_gan')
-                
-                VanillaGAN = vanilla_gan_module.VanillaGAN
-                VanillaGANConfig = vanilla_gan_module.VanillaGANConfig
-                TrainingAlgorithm = getattr(vanilla_gan_module, 'TrainingAlgorithm', None)
-                
-                print('VanillaGAN imported via importlib from nesy-factory')
-                
-            except ImportError as e2:
-                print(f'All import methods failed. Final error: {e2}')
-                print('Available Python packages:')
-                import pkg_resources
-                installed_packages = [d.project_name for d in pkg_resources.working_set]
-                print([pkg for pkg in installed_packages if 'nesy' in pkg.lower()])
-                raise ImportError(f'VanillaGAN not available in nesy-factory Docker container')
+                vanilla_config = VanillaGANConfig(**vanilla_config_dict)
+                gan_model = VanillaGAN(vanilla_config)
+                print('Vanilla GAN model created successfully')
+            except Exception as e:
+                print(f'Error creating Vanilla GAN: {e}')
+                import traceback
+                traceback.print_exc()
+                raise
         
-        print('Creating Vanilla GAN model...')
-        
-        # Build configuration for Vanilla GAN
-        vanilla_config_dict = {
-            # Basic GAN parameters
-            'input_dim': gan_config.get('input_dim', 784),
-            'latent_dim': gan_config.get('latent_dim', 100),
-            'batch_size': gan_config.get('batch_size', 32),
-            'epochs': gan_config.get('epochs', 100),
-            'lr': gan_config.get('learning_rate', 0.0002),
-            'beta1': gan_config.get('beta1', 0.5),
-            'beta2': gan_config.get('beta2', 0.999),
-            
-            # Network architecture
-            'generator_layers': gan_config.get('generator_layers', [256, 512, 1024]),
-            'discriminator_layers': gan_config.get('discriminator_layers', [1024, 512, 256]),
-            'generator_activation': gan_config.get('generator_activation', 'relu'),
-            'discriminator_activation': gan_config.get('discriminator_activation', 'leaky_relu'),
-            'output_activation': gan_config.get('output_activation', 'tanh'),
-            'generator_dropout': gan_config.get('generator_dropout', 0.0),
-            'discriminator_dropout': gan_config.get('discriminator_dropout', 0.3),
-            
-            # Training algorithm
-            'training_algorithm': gan_config.get('training_algorithm', 'backprop'),
-            'use_forward_forward': gan_config.get('training_algorithm', '').lower() == 'forward_forward',
-            'use_cafo': gan_config.get('training_algorithm', '').lower() == 'cafo',
-            
-            # Forward-Forward parameters
-            'ff_blocks': gan_config.get('ff_blocks', 3),
-            'ff_epochs_per_block': gan_config.get('ff_epochs_per_block', 50),
-            'ff_theta': gan_config.get('ff_theta', 2.0),
-            'ff_positive_margin': gan_config.get('ff_positive_margin', 2.0),
-            'ff_negative_margin': gan_config.get('ff_negative_margin', 0.0),
-            
-            # CAFO parameters
-            'cafo_blocks': gan_config.get('cafo_blocks', 3),
-            'epochs_per_block': gan_config.get('epochs_per_block', 30),
-            'block_lr': gan_config.get('block_lr', 0.001),
-            
-            # Training parameters
-            'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-            'sample_interval': gan_config.get('sample_interval', 100),
-            'save_interval': gan_config.get('save_interval', 500),
-            'log_interval': gan_config.get('log_interval', 10)
-        }
-        
-        print(f'Vanilla GAN config dict: {vanilla_config_dict}')
-        
-        # Create Vanilla GAN model
-        try:
-            vanilla_config = VanillaGANConfig(**vanilla_config_dict)
-            print('VanillaGANConfig created successfully')
-            
-            # Validate configuration if method exists
-            try:
-                is_valid, warnings = vanilla_config.validate()
-                if not is_valid:
-                    print(f'Configuration validation warnings: {warnings}')
-            except AttributeError:
-                print('Validation method not available, proceeding...')
-            
-            vanilla_gan_model = VanillaGAN(vanilla_config)
-            print('Vanilla GAN model created successfully')
-            
-            print('Model Summary:')
-            print(f'  Generator: {type(vanilla_gan_model.generator).__name__}')
-            print(f'  Discriminator: {type(vanilla_gan_model.discriminator).__name__}')
-            if hasattr(vanilla_gan_model, 'trainer'):
-                print(f'  Trainer: {type(vanilla_gan_model.trainer).__name__}')
-                if hasattr(vanilla_gan_model.trainer, 'device'):
-                    print(f'  Device: {vanilla_gan_model.trainer.device}')
-            else:
-                print(f'  Device: {vanilla_config_dict.get("device", "cpu")}')
-            
-        except Exception as e:
-            print(f'Error creating Vanilla GAN: {e}')
-            import traceback
-            traceback.print_exc()
-            raise
-        
-        if vanilla_gan_model is None:
-            raise RuntimeError("Failed to create Vanilla GAN model")
+        if gan_model is None:
+            raise RuntimeError(f"Failed to create {model_type.upper()} model")
         
         # Save model
         output_dir = os.path.dirname(args.model_path)
@@ -215,29 +201,16 @@ implementation:
             os.makedirs(output_dir, exist_ok=True)
         
         with open(args.model_path, 'wb') as f:
-            pickle.dump(vanilla_gan_model, f)
+            pickle.dump(gan_model, f)
         print(f'Model saved to: {args.model_path}')
         
         # Save initialization config
         init_config = {
             'model_created': True,
-            'model_type': 'vanilla_gan',
+            'model_type': model_type,
             'success': True,
             'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-            'input_dim': vanilla_config_dict['input_dim'],
-            'latent_dim': vanilla_config_dict['latent_dim'],
-            'training_algorithm': vanilla_config_dict['training_algorithm'],
-            'generator_layers': vanilla_config_dict['generator_layers'],
-            'discriminator_layers': vanilla_config_dict['discriminator_layers'],
-            'num_classes': gan_config.get('num_classes', 2),
-            'class_names': gan_config.get('class_names', ['inputfield', 'toggle']),
-            'dataset_type': gan_config.get('dataset_type', 'ui_components'),
-            'original_config': gan_config,
-            'model_summary': {
-                'generator_class': type(vanilla_gan_model.generator).__name__,
-                'discriminator_class': type(vanilla_gan_model.discriminator).__name__,
-                'trainer_class': type(vanilla_gan_model.trainer).__name__ if hasattr(vanilla_gan_model, 'trainer') else 'SimpleTrainer'
-            }
+            'original_config': gan_config
         }
         
         output_dir_config = os.path.dirname(args.init_config_path)
@@ -248,11 +221,9 @@ implementation:
             json.dump(init_config, f, indent=2)
         print(f'Init config saved to: {args.init_config_path}')
         
-        print('VANILLA GAN Model Initialization Complete')
-        print(f'Model type: vanilla_gan')
-        print(f'Model class: {type(vanilla_gan_model).__name__}')
-        print(f'Training algorithm: {vanilla_config_dict["training_algorithm"]}')
-        print(f'Input dimension: {vanilla_config_dict["input_dim"]}')
+        print(f'{model_type.upper()} Model Initialization Complete')
+        print(f'Model type: {model_type}')
+        print(f'Model class: {type(gan_model).__name__}')
         print(f'Model created successfully')
 
     args:
