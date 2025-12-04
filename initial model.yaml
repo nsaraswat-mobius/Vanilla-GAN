@@ -79,12 +79,18 @@ implementation:
         print(f'  Generator Layers: {gan_config.get("generator_layers", [256, 512, 1024])}')
         print(f'  Discriminator Layers: {gan_config.get("discriminator_layers", [1024, 512, 256])}')
         
-        # Import Vanilla GAN
-        print('Importing VanillaGAN...')
+        # Import Vanilla GAN from nesy-factory Docker container
+        print('Importing VanillaGAN from nesy-factory...')
         try:
-            # First try to create a minimal registry to avoid dependency issues
+            # First create minimal registry to satisfy any registry dependencies
+            import sys
+            
+            # Create a minimal registry if it doesn't exist
             try:
-                import sys
+                from nesy_factory.GANs.registry import register_gan_model, get_gan_model, list_gan_models
+                print('Registry imported from nesy-factory')
+            except ImportError:
+                print('Creating minimal registry for compatibility')
                 class MinimalRegistry:
                     _models = {}
                     @classmethod
@@ -97,155 +103,65 @@ implementation:
                     def list_gan_models(cls):
                         return list(cls._models.keys())
                 
-                # Add minimal registry to sys.modules to satisfy imports
+                # Add to sys.modules
                 if 'nesy_factory' not in sys.modules:
                     sys.modules['nesy_factory'] = type(sys)('nesy_factory')
                 if 'nesy_factory.GANs' not in sys.modules:
                     sys.modules['nesy_factory.GANs'] = type(sys)('GANs')
-                if 'nesy_factory.GANs.registry' not in sys.modules:
-                    registry_module = type(sys)('registry')
-                    for attr in ['register_gan_model', 'get_gan_model', 'list_gan_models']:
-                        setattr(registry_module, attr, getattr(MinimalRegistry, attr))
-                    sys.modules['nesy_factory.GANs.registry'] = registry_module
-                print('Created minimal registry to satisfy dependencies')
-            except Exception as reg_error:
-                print(f'Registry setup warning: {reg_error}')
-            
-            from nesy_factory.GANs.vanilla_gan import VanillaGAN, VanillaGANConfig, TrainingAlgorithm
-            print('VanillaGAN imported successfully')
-        except ImportError as e:
-            print(f'VanillaGAN import error: {e}')
-            print('Attempting to load from current directory...')
-            try:
-                # Fallback: try to load from local file with multiple paths
-                import importlib.util
-                possible_paths = [
-                    "/workspace/src/nesy_factory/GANs/vanilla_gan.py",
-                    "vanilla_gan.py",
-                    "../vanilla_gan.py",
-                    "/app/src/nesy_factory/GANs/vanilla_gan.py"
-                ]
                 
-                vanilla_gan_module = None
-                for path in possible_paths:
+                registry_module = type(sys)('registry')
+                for attr in ['register_gan_model', 'get_gan_model', 'list_gan_models']:
+                    setattr(registry_module, attr, getattr(MinimalRegistry, attr))
+                sys.modules['nesy_factory.GANs.registry'] = registry_module
+            
+            # Now import VanillaGAN from nesy-factory
+            from nesy_factory.GANs.vanilla_gan import VanillaGAN, VanillaGANConfig, TrainingAlgorithm
+            print('VanillaGAN imported successfully from nesy-factory')
+            
+        except ImportError as import_error:
+            print(f'Failed to import from nesy-factory: {import_error}')
+            
+            # Fallback: Try to find VanillaGAN in the Docker container's Python path
+            print('Searching for VanillaGAN in Docker container...')
+            import importlib.util
+            import glob
+            
+            # Search for vanilla_gan.py in common Docker container locations
+            search_paths = [
+                '/usr/local/lib/python*/site-packages/nesy_factory/GANs/vanilla_gan.py',
+                '/opt/conda/lib/python*/site-packages/nesy_factory/GANs/vanilla_gan.py',
+                '/usr/lib/python*/site-packages/nesy_factory/GANs/vanilla_gan.py',
+                '/app/nesy_factory/GANs/vanilla_gan.py',
+                '/workspace/nesy_factory/GANs/vanilla_gan.py'
+            ]
+            
+            vanilla_gan_found = False
+            for pattern in search_paths:
+                matching_files = glob.glob(pattern)
+                for vanilla_gan_path in matching_files:
                     try:
-                        if os.path.exists(path):
-                            spec = importlib.util.spec_from_file_location("vanilla_gan", path)
-                            if spec and spec.loader:
-                                vanilla_gan_module = importlib.util.module_from_spec(spec)
-                                spec.loader.exec_module(vanilla_gan_module)
-                                print(f'VanillaGAN loaded from: {path}')
+                        print(f'Trying to load VanillaGAN from: {vanilla_gan_path}')
+                        spec = importlib.util.spec_from_file_location("vanilla_gan_module", vanilla_gan_path)
+                        if spec and spec.loader:
+                            vanilla_gan_module = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(vanilla_gan_module)
+                            
+                            if hasattr(vanilla_gan_module, 'VanillaGAN'):
+                                VanillaGAN = vanilla_gan_module.VanillaGAN
+                                VanillaGANConfig = vanilla_gan_module.VanillaGANConfig
+                                TrainingAlgorithm = getattr(vanilla_gan_module, 'TrainingAlgorithm', None)
+                                print(f'VanillaGAN loaded successfully from: {vanilla_gan_path}')
+                                vanilla_gan_found = True
                                 break
-                    except Exception as pe:
-                        print(f'Failed to load from {path}: {pe}')
+                    except Exception as e:
+                        print(f'Failed to load from {vanilla_gan_path}: {e}')
                         continue
                 
-                if vanilla_gan_module:
-                    VanillaGAN = vanilla_gan_module.VanillaGAN
-                    VanillaGANConfig = vanilla_gan_module.VanillaGANConfig
-                    TrainingAlgorithm = getattr(vanilla_gan_module, 'TrainingAlgorithm', None)
-                    print('VanillaGAN loaded from local file')
-                else:
-                    raise ImportError("Could not load VanillaGAN from any path")
-            except Exception as e2:
-                print(f'Local load failed: {e2}')
-                # Last resort: create minimal vanilla GAN implementation
-                print('Creating minimal VanillaGAN implementation...')
-                try:
-                    import torch.nn as nn
-                    
-                    # Define classes at module level to make them picklable
-                    class SimpleVanillaGANConfig:
-                        def __init__(self, **kwargs):
-                            for key, value in kwargs.items():
-                                setattr(self, key, value)
-                        
-                        def validate(self):
-                            return True, []
-                    
-                    class SimpleGenerator(nn.Module):
-                        def __init__(self, latent_dim, output_dim, hidden_layers):
-                            super().__init__()
-                            layers = []
-                            prev_dim = latent_dim
-                            for hidden_dim in hidden_layers:
-                                layers.extend([
-                                    nn.Linear(prev_dim, hidden_dim),
-                                    nn.ReLU()
-                                ])
-                                prev_dim = hidden_dim
-                            layers.append(nn.Linear(prev_dim, output_dim))
-                            layers.append(nn.Tanh())
-                            self.model = nn.Sequential(*layers)
-                        
-                        def forward(self, z):
-                            return self.model(z)
-                    
-                    class SimpleDiscriminator(nn.Module):
-                        def __init__(self, input_dim, hidden_layers):
-                            super().__init__()
-                            layers = []
-                            prev_dim = input_dim
-                            for hidden_dim in hidden_layers:
-                                layers.extend([
-                                    nn.Linear(prev_dim, hidden_dim),
-                                    nn.LeakyReLU(0.2)
-                                ])
-                                prev_dim = hidden_dim
-                            layers.append(nn.Linear(prev_dim, 1))
-                            layers.append(nn.Sigmoid())
-                            self.model = nn.Sequential(*layers)
-                        
-                        def forward(self, x):
-                            return self.model(x)
-                    
-                    # Make SimpleTrainer picklable by defining it at module level
-                    class SimpleTrainer:
-                        def __init__(self, device='cpu'):
-                            self.device = device
-                            self.generator_optimizer = None
-                            self.discriminator_optimizer = None
-                        
-                        def train(self, *args, **kwargs):
-                            print('Training not implemented in minimal trainer')
-                            pass
-                    
-                    class SimpleVanillaGAN:
-                        def __init__(self, config):
-                            self.config = config
-                            self.generator = SimpleGenerator(
-                                config.latent_dim,
-                                config.input_dim,
-                                config.generator_layers
-                            )
-                            self.discriminator = SimpleDiscriminator(
-                                config.input_dim,
-                                config.discriminator_layers
-                            )
-                            self.trainer = SimpleTrainer(config.device)
-                        
-                        def train(self, *args, **kwargs):
-                            return self.trainer.train(*args, **kwargs)
-                        
-                        def generate(self, num_samples=10):
-                            with torch.no_grad():
-                                z = torch.randn(num_samples, self.config.latent_dim)
-                                return self.generator(z)
-                    
-                    # Add these to global namespace to make them available
-                    globals()['SimpleVanillaGANConfig'] = SimpleVanillaGANConfig
-                    globals()['SimpleGenerator'] = SimpleGenerator
-                    globals()['SimpleDiscriminator'] = SimpleDiscriminator
-                    globals()['SimpleTrainer'] = SimpleTrainer
-                    globals()['SimpleVanillaGAN'] = SimpleVanillaGAN
-                    
-                    VanillaGAN = SimpleVanillaGAN
-                    VanillaGANConfig = SimpleVanillaGANConfig
-                    TrainingAlgorithm = None
-                    print('Minimal VanillaGAN implementation created with picklable classes')
-                except Exception as e3:
-                    print(f'Failed to create minimal implementation: {e3}')
-                    raise ImportError("VanillaGAN not available and cannot create fallback")
+                if vanilla_gan_found:
+                    break
+            
+            if not vanilla_gan_found:
+                raise ImportError('VanillaGAN not found in nesy-factory Docker container')
         
         print('Creating Vanilla GAN model...')
         
