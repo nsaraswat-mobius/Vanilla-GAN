@@ -22,24 +22,6 @@ implementation:
         # nesy-factory 1.0.0 requires torch<2.3.0,>=2.0.0
         # So we install torchvision 0.15.2 which is compatible with torch 2.0.0-2.2.0
         pip install torchvision==0.15.2 --no-deps --quiet
-        
-        # Copy the local vanilla_gan.py file to the container
-        echo "Copying vanilla_gan.py to container..."
-        mkdir -p /tmp/local_gans
-        cat > /tmp/local_gans/registry.py << 'EOF'
-# Minimal registry for VanillaGAN
-_models = {}
-
-def register_gan_model(name, model_class):
-    _models[name] = model_class
-
-def get_gan_model(name):
-    return _models.get(name)
-
-def list_gan_models():
-    return list(_models.keys())
-EOF
-        
         exec "$0" "$@"
       - python3
       - -u
@@ -108,14 +90,26 @@ EOF
         except ImportError as e:
             print(f'Failed to import from nesy-factory: {e}')
             
-            # Fallback: try alternative import paths in nesy-factory
+            # Check if nesy_factory is available at all
             try:
-                import sys
+                import nesy_factory
+                print(f'nesy_factory found at: {nesy_factory.__file__}')
+                print(f'nesy_factory version: {getattr(nesy_factory, "__version__", "unknown")}')
+                
+                # Try to see what's available in nesy_factory.GANs
+                try:
+                    import nesy_factory.GANs as gans
+                    print(f'GANs module found: {dir(gans)}')
+                except ImportError as gans_error:
+                    print(f'GANs module not found: {gans_error}')
+                
+            except ImportError:
+                print('nesy_factory package not found in container')
+            
+            # Fallback: try alternative import methods
+            try:
                 import importlib
                 
-                # Try to import nesy_factory module first
-                nesy_factory = importlib.import_module('nesy_factory')
-                gans_module = importlib.import_module('nesy_factory.GANs')
                 vanilla_gan_module = importlib.import_module('nesy_factory.GANs.vanilla_gan')
                 
                 VanillaGAN = vanilla_gan_module.VanillaGAN
@@ -125,8 +119,12 @@ EOF
                 print('VanillaGAN imported via importlib from nesy-factory')
                 
             except ImportError as e2:
-                print(f'Fallback import failed: {e2}')
-                raise ImportError(f'VanillaGAN not found in nesy-factory package: {e}. Original error: {e2}')
+                print(f'All import methods failed. Final error: {e2}')
+                print('Available Python packages:')
+                import pkg_resources
+                installed_packages = [d.project_name for d in pkg_resources.working_set]
+                print([pkg for pkg in installed_packages if 'nesy' in pkg.lower()])
+                raise ImportError(f'VanillaGAN not available in nesy-factory Docker container')
         
         print('Creating Vanilla GAN model...')
         
