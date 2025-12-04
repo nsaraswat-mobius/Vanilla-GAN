@@ -1,21 +1,20 @@
-name: Preprocess UI Components For Vanilla GAN
-description: Preprocesses UI component images for Vanilla GAN training with optimized transforms for input fields and toggles.
+name: Preprocess For Vanilla GAN
+description: Preprocesses dataset specifically for Vanilla GAN training with UI component optimizations.
 inputs:
   - name: train_data
     type: Dataset
-  - name: test_data
-    type: Dataset  
   - name: dataset_info
     type: DatasetInfo
+  - name: data_config
+    type: String
+    description: "Data configuration from LoadDataset"
   - name: model_config
     type: String
     description: "Vanilla GAN model configuration"
 outputs:
-  - name: processed_train_data
+  - name: processed_data
     type: Dataset
-  - name: processed_test_data
-    type: Dataset
-  - name: vanilla_gan_config
+  - name: gan_config
     type: String
     description: "Vanilla GAN configuration for training"
 implementation:
@@ -25,320 +24,203 @@ implementation:
       - sh
       - -c
       - |
+        # Install required dependencies first
         pip install torch torchvision pillow numpy scikit-learn --quiet
         echo "Dependencies installed successfully"
-        python3 -c "
-import sys, os, pickle, json, base64, io, math
-import numpy as np
-import torch
-import torchvision.transforms as transforms
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image, ImageOps
-from sklearn.preprocessing import LabelEncoder
-
-print(' Starting UI Component Preprocessing for Vanilla GAN')
-print('=' * 60)
-# Parse arguments
-train_data_path = sys.argv[1]
-test_data_path = sys.argv[2]
-dataset_info_path = sys.argv[3]
-model_config_str = sys.argv[4]
-processed_train_path = sys.argv[5]
-processed_test_path = sys.argv[6]
-vanilla_gan_config_path = sys.argv[7]
-
-# Load data
-print(' Loading datasets...')
-with open(train_data_path, 'rb') as f:
-    train_data = pickle.load(f)
-
-with open(test_data_path, 'rb') as f:
-    test_data = pickle.load(f)
-
-with open(dataset_info_path, 'rb') as f:
-    dataset_info = pickle.load(f)
-
-# Parse model config
-model_config = json.loads(model_config_str) if model_config_str else {}
-
-print(f' Dataset Info:')
-print(f'  Train samples: {len(train_data)}')
-print(f'  Test samples: {len(test_data)}')
-print(f'  Classes: {dataset_info.get(\"classes\", [])}')
-print(f'  Class distribution: {dataset_info.get(\"class_distribution\", {})}')
-
-# Configuration parameters
-target_width = model_config.get('target_width', 64)
-target_height = model_config.get('target_height', 64)
-channels = model_config.get('channels', 3)  # RGB (no alpha for GAN)
-normalize_method = model_config.get('normalize_method', 'tanh')  # tanh or standard
-preserve_aspect_ratio = model_config.get('preserve_aspect_ratio', False)
-background_color = model_config.get('background_color', 'white')  # white or black
-
-print(f'  Processing Parameters:')
-print(f'  Target size: {target_width}x{target_height}')
-print(f'  Channels: {channels}')
-print(f'  Normalization: {normalize_method}')
-print(f'  Preserve aspect ratio: {preserve_aspect_ratio}')
-print(f'  Background color: {background_color}')
-
-# Calculate final input dimension for Vanilla GAN
-input_dim = target_width * target_height * channels
-print(f' Vanilla GAN input dimension: {input_dim}')
-
-# Define custom dataset class for UI components
-class UIComponentDataset(Dataset):
-    def __init__(self, data_list, transform=None, label_encoder=None):
-        self.data_list = data_list
-        self.transform = transform
-        self.label_encoder = label_encoder
-    
-    def __len__(self):
-        return len(self.data_list)
-    
-    def __getitem__(self, idx):
-        item = self.data_list[idx]
+        
+        # Then run the Python script
+        python -c "
+        import sys, os, pickle, json, base64, io, math
+        import numpy as np
+        import torch
+        import torchvision.transforms as transforms
+        from torch.utils.data import Dataset
+        from PIL import Image
+        from sklearn.preprocessing import LabelEncoder
+        
+        print('Starting Vanilla GAN Preprocessing for UI Components')
+        
+        # Parse arguments
+        train_data_path = sys.argv[1]
+        dataset_info_path = sys.argv[2]
+        data_config_str = sys.argv[3]
+        model_config_str = sys.argv[4]
+        processed_data_path = sys.argv[5]
+        gan_config_path = sys.argv[6]
+        
+        # Load data
+        with open(train_data_path, 'rb') as f:
+            train_data = pickle.load(f)
+        
+        with open(dataset_info_path, 'rb') as f:
+            dataset_info = pickle.load(f)
+        
+        # Parse configs
         try:
-            # Decode image
-            img_data = base64.b64decode(item['image_data'])
-            img = Image.open(io.BytesIO(img_data))
+            data_config = json.loads(data_config_str) if data_config_str else {}
+        except:
+            data_config = {}
+        
+        try:
+            model_config = json.loads(model_config_str) if model_config_str else {}
+        except:
+            model_config = {}
+        
+        print('Processing for VANILLA GAN')
+        print('Loaded ' + str(len(train_data)) + ' samples')
+        
+        # Get parameters from configs - optimized for Vanilla GAN
+        image_size = model_config.get('image_size', data_config.get('image_size', 64))
+        channels = model_config.get('channels', data_config.get('channels', 3))
+        target_size = model_config.get('target_size', image_size)
+        background_color = model_config.get('background_color', 'white')
+        
+        print('Parameters:')
+        print('  Model Type: VANILLA GAN')
+        print('  Channels: ' + str(channels))
+        print('  Target Size: ' + str(target_size))
+        print('  Background: ' + background_color)
+        
+        # Create label encoder for UI component classes
+        all_labels = [item['label'] for item in train_data]
+        label_encoder = LabelEncoder()
+        label_encoder.fit(all_labels)
+        unique_classes = label_encoder.classes_.tolist()
+        
+        print('Classes found: ' + str(unique_classes))
+        
+        # Define dataset class specifically for Vanilla GAN
+        class VanillaGANDataset(Dataset):
+            def __init__(self, data_list, transform=None, label_encoder=None, target_size=64, channels=3, bg_color='white'):
+                self.data_list = data_list
+                self.transform = transform
+                self.label_encoder = label_encoder
+                self.target_size = target_size
+                self.channels = channels
+                self.bg_color = bg_color
             
-            # Handle RGBA -> RGB conversion for UI components
-            if img.mode == 'RGBA':
-                # Create background
-                bg_color = (255, 255, 255) if background_color == 'white' else (0, 0, 0)
-                background = Image.new('RGB', img.size, bg_color)
-                background.paste(img, mask=img.split()[-1])  # Use alpha channel as mask
-                img = background
-            elif img.mode != 'RGB' and channels == 3:
-                img = img.convert('RGB')
-            elif img.mode != 'L' and channels == 1:
-                img = img.convert('L')
+            def __len__(self):
+                return len(self.data_list)
             
-            # Apply transforms
-            if self.transform:
-                img = self.transform(img)
-            
-            # Flatten for Vanilla GAN
-            img_flattened = img.view(-1)
-            
-            # Get label
-            label = item['label']
-            if self.label_encoder:
-                label_encoded = self.label_encoder.transform([label])[0]
-            else:
-                label_encoded = 0
-            
-            return img_flattened, label_encoded, label
-            
-        except Exception as e:
-            print(f'  Error processing image {idx}: {str(e)}')
-            # Return zero tensor on error
-            return torch.zeros(input_dim), 0, 'unknown'
-
-# Create label encoder
-all_labels = [item['label'] for item in train_data + test_data]
-label_encoder = LabelEncoder()
-label_encoder.fit(all_labels)
-
-print(f'  Label encoding: {dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))}')
-
-# Define transforms for UI components
-if preserve_aspect_ratio:
-    # Resize maintaining aspect ratio, then pad/crop to target size
-    if channels == 1:
-        if normalize_method == 'tanh':
+            def __getitem__(self, idx):
+                item = self.data_list[idx]
+                try:
+                    img_data = base64.b64decode(item['image_data'])
+                    img = Image.open(io.BytesIO(img_data))
+                    
+                    # Handle RGBA -> RGB conversion for UI components
+                    if img.mode == 'RGBA':
+                        bg_color = (255, 255, 255) if self.bg_color == 'white' else (0, 0, 0)
+                        background = Image.new('RGB', img.size, bg_color)
+                        background.paste(img, mask=img.split()[-1])
+                        img = background
+                    elif self.channels == 1 and img.mode != 'L':
+                        img = img.convert('L')
+                    elif self.channels == 3 and img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    
+                    if self.transform:
+                        img = self.transform(img)
+                    
+                    # IMPORTANT: Flatten for Vanilla GAN (fully connected layers)
+                    img = img.view(-1)
+                    
+                    return img
+                except Exception as e:
+                    print('Error processing image ' + str(idx) + ': ' + str(e))
+                    return torch.zeros(self.target_size * self.target_size * self.channels)
+        
+        # Create transform optimized for Vanilla GAN
+        if channels == 1:
             transform = transforms.Compose([
-                transforms.Resize(min(target_width, target_height), interpolation=transforms.InterpolationMode.LANCZOS),
-                transforms.CenterCrop((target_height, target_width)),
+                transforms.Resize(target_size, interpolation=transforms.InterpolationMode.LANCZOS),
                 transforms.ToTensor(),
-                transforms.Normalize((0.5,), (0.5,))  # Normalize to [-1, 1] for tanh
+                transforms.Normalize((0.5,), (0.5,))  # Normalize to [-1, 1] for tanh activation
             ])
         else:
             transform = transforms.Compose([
-                transforms.Resize(min(target_width, target_height), interpolation=transforms.InterpolationMode.LANCZOS),
-                transforms.CenterCrop((target_height, target_width)),
+                transforms.Resize(target_size, interpolation=transforms.InterpolationMode.LANCZOS),
                 transforms.ToTensor(),
-                transforms.Normalize((0.485,), (0.229,))  # ImageNet stats for grayscale
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Normalize to [-1, 1] for tanh activation
             ])
-    else:
-        if normalize_method == 'tanh':
-            transform = transforms.Compose([
-                transforms.Resize(min(target_width, target_height), interpolation=transforms.InterpolationMode.LANCZOS),
-                transforms.CenterCrop((target_height, target_width)),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Normalize to [-1, 1] for tanh
-            ])
-        else:
-            transform = transforms.Compose([
-                transforms.Resize(min(target_width, target_height), interpolation=transforms.InterpolationMode.LANCZOS),
-                transforms.CenterCrop((target_height, target_width)),
-                transforms.ToTensor(),
-                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))  # ImageNet stats
-            ])
-else:
-    # Direct resize (may distort aspect ratio)
-    if channels == 1:
-        if normalize_method == 'tanh':
-            transform = transforms.Compose([
-                transforms.Resize((target_height, target_width), interpolation=transforms.InterpolationMode.LANCZOS),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5,), (0.5,))
-            ])
-        else:
-            transform = transforms.Compose([
-                transforms.Resize((target_height, target_width), interpolation=transforms.InterpolationMode.LANCZOS),
-                transforms.ToTensor(),
-                transforms.Normalize((0.485,), (0.229,))
-            ])
-    else:
-        if normalize_method == 'tanh':
-            transform = transforms.Compose([
-                transforms.Resize((target_height, target_width), interpolation=transforms.InterpolationMode.LANCZOS),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-            ])
-        else:
-            transform = transforms.Compose([
-                transforms.Resize((target_height, target_width), interpolation=transforms.InterpolationMode.LANCZOS),
-                transforms.ToTensor(),
-                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-            ])
-
-print(' Creating processed datasets...')
-
-# Create datasets
-train_dataset = UIComponentDataset(train_data, transform, label_encoder)
-test_dataset = UIComponentDataset(test_data, transform, label_encoder)
-
-print(f' Train dataset: {len(train_dataset)} samples')
-print(f' Test dataset: {len(test_dataset)} samples')
-
-# Test a sample to verify processing
-try:
-    sample_img, sample_label, sample_label_name = train_dataset[0]
-    print(f' Sample verification:')
-    print(f'  Image tensor shape: {sample_img.shape}')
-    print(f'  Image value range: [{sample_img.min():.3f}, {sample_img.max():.3f}]')
-    print(f'  Label: {sample_label} ({sample_label_name})')
-except Exception as e:
-    print(f'  Warning: Could not verify sample: {e}')
-
-# Create data wrappers
-train_wrapper = {
-    'dataset': train_dataset,
-    'model_type': 'vanilla_gan',
-    'input_dim': input_dim,
-    'image_size': (target_height, target_width),
-    'channels': channels,
-    'num_samples': len(train_dataset),
-    'num_classes': len(label_encoder.classes_),
-    'classes': label_encoder.classes_.tolist(),
-    'label_encoder': label_encoder,
-    'is_flattened': True,
-    'normalization': normalize_method
-}
-
-test_wrapper = {
-    'dataset': test_dataset,
-    'model_type': 'vanilla_gan',
-    'input_dim': input_dim,
-    'image_size': (target_height, target_width),
-    'channels': channels,
-    'num_samples': len(test_dataset),
-    'num_classes': len(label_encoder.classes_),
-    'classes': label_encoder.classes_.tolist(),
-    'label_encoder': label_encoder,
-    'is_flattened': True,
-    'normalization': normalize_method
-}
-
-# Save processed datasets
-print(' Saving processed datasets...')
-
-os.makedirs(os.path.dirname(processed_train_path) or '.', exist_ok=True)
-with open(processed_train_path, 'wb') as f:
-    pickle.dump(train_wrapper, f)
-
-os.makedirs(os.path.dirname(processed_test_path) or '.', exist_ok=True)
-with open(processed_test_path, 'wb') as f:
-    pickle.dump(test_wrapper, f)
-
-# Create Vanilla GAN configuration
-vanilla_gan_config = {
-    'model_type': 'vanilla_gan',
-    'input_dim': input_dim,
-    'latent_dim': model_config.get('latent_dim', 100),
-    'image_size': target_width,
-    'image_height': target_height,
-    'channels': channels,
-    'num_classes': len(label_encoder.classes_),
-    'class_names': label_encoder.classes_.tolist(),
-    
-    # Network architecture
-    'generator_layers': model_config.get('generator_layers', [256, 512, 1024]),
-    'discriminator_layers': model_config.get('discriminator_layers', [1024, 512, 256]),
-    'generator_activation': model_config.get('generator_activation', 'relu'),
-    'discriminator_activation': model_config.get('discriminator_activation', 'leaky_relu'),
-    'output_activation': 'tanh' if normalize_method == 'tanh' else 'sigmoid',
-    'generator_dropout': model_config.get('generator_dropout', 0.0),
-    'discriminator_dropout': model_config.get('discriminator_dropout', 0.3),
-    
-    # Training parameters
-    'batch_size': model_config.get('batch_size', 32),
-    'learning_rate': model_config.get('learning_rate', 0.0002),
-    'beta1': model_config.get('beta1', 0.5),
-    'beta2': model_config.get('beta2', 0.999),
-    'epochs': model_config.get('epochs', 100),
-    'training_algorithm': model_config.get('training_algorithm', 'backprop'),
-    
-    # Forward-Forward parameters (if used)
-    'ff_blocks': model_config.get('ff_blocks', 3),
-    'ff_epochs_per_block': model_config.get('ff_epochs_per_block', 50),
-    'ff_theta': model_config.get('ff_theta', 2.0),
-    
-    # CAFO parameters (if used)
-    'cafo_blocks': model_config.get('cafo_blocks', 3),
-    'epochs_per_block': model_config.get('epochs_per_block', 30),
-    'block_lr': model_config.get('block_lr', 0.001),
-    
-    # Device and logging
-    'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-    'log_interval': model_config.get('log_interval', 10),
-    'sample_interval': model_config.get('sample_interval', 100),
-    'save_interval': model_config.get('save_interval', 500),
-    
-    # UI-specific metadata
-    'original_dataset_size': (1056, 91),  # Original UI component size
-    'dataset_type': 'ui_components',
-    'background_removal': True,
-    'alpha_handled': True,
-    'preprocessing_method': 'lanczos_resize',
-    'normalization_method': normalize_method
-}
-
-# Save configuration
-os.makedirs(os.path.dirname(vanilla_gan_config_path) or '.', exist_ok=True)
-with open(vanilla_gan_config_path, 'w') as f:
-    json.dump(vanilla_gan_config, f, indent=2)
-
-print(' UI Component Preprocessing Complete!')
-print('=' * 60)
-print(f' Summary:')
-print(f'  Train samples: {len(train_dataset)}')
-print(f'  Test samples: {len(test_dataset)}')
-print(f'  Input dimension: {input_dim}')
-print(f'  Classes: {len(label_encoder.classes_)} ({list(label_encoder.classes_)})')
-print(f'  Target size: {target_width}x{target_height}x{channels}')
-print(f'  Training algorithm: {vanilla_gan_config[\"training_algorithm\"]}')
-print(f'  Device: {vanilla_gan_config[\"device\"]}')
-print(' Files saved successfully')
-" "$0" "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+        
+        # Create dataset
+        dataset = VanillaGANDataset(train_data, transform, label_encoder, target_size, channels, background_color)
+        
+        # Calculate input dimension for Vanilla GAN (crucial for fully connected layers)
+        input_dim = target_size * target_size * channels
+        print('Vanilla GAN input dimension: ' + str(input_dim))
+        
+        # Create data wrapper
+        data_wrapper = {
+            'dataset': dataset,
+            'model_type': 'vanilla_gan',
+            'input_dim': input_dim,
+            'image_size': target_size,
+            'channels': channels,
+            'num_samples': len(dataset),
+            'num_classes': len(unique_classes),
+            'classes': unique_classes,
+            'label_encoder': label_encoder,
+            'is_flattened': True,
+            'original_size': (1056, 91),
+            'background_handled': True
+        }
+        
+        # Save processed data
+        os.makedirs(os.path.dirname(processed_data_path) or '.', exist_ok=True)
+        with open(processed_data_path, 'wb') as f:
+            pickle.dump(data_wrapper, f)
+        
+        # Create Vanilla GAN configuration
+        gan_config = {
+            'model_type': 'vanilla_gan',
+            'input_dim': input_dim,
+            'image_size': target_size,
+            'channels': channels,
+            'num_classes': len(unique_classes),
+            'class_names': unique_classes,
+            'latent_dim': model_config.get('latent_dim', 100),
+            'generator_layers': model_config.get('generator_layers', [256, 512, 1024]),
+            'discriminator_layers': model_config.get('discriminator_layers', [1024, 512, 256]),
+            'generator_activation': model_config.get('generator_activation', 'relu'),
+            'discriminator_activation': model_config.get('discriminator_activation', 'leaky_relu'),
+            'output_activation': 'tanh',
+            'generator_dropout': model_config.get('generator_dropout', 0.0),
+            'discriminator_dropout': model_config.get('discriminator_dropout', 0.3),
+            'batch_size': model_config.get('batch_size', 32),
+            'learning_rate': model_config.get('learning_rate', 0.0002),
+            'beta1': model_config.get('beta1', 0.5),
+            'beta2': model_config.get('beta2', 0.999),
+            'epochs': model_config.get('epochs', 100),
+            'training_algorithm': model_config.get('training_algorithm', 'backprop'),
+            'ff_blocks': model_config.get('ff_blocks', 3),
+            'ff_epochs_per_block': model_config.get('ff_epochs_per_block', 50),
+            'cafo_blocks': model_config.get('cafo_blocks', 3),
+            'epochs_per_block': model_config.get('epochs_per_block', 30),
+            'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+            'log_interval': model_config.get('log_interval', 10),
+            'sample_interval': model_config.get('sample_interval', 100),
+            'dataset_type': 'ui_components'
+        }
+        
+        # Save GAN config
+        os.makedirs(os.path.dirname(gan_config_path) or '.', exist_ok=True)
+        with open(gan_config_path, 'w') as f:
+            json.dump(gan_config, f, indent=2)
+        
+        print('Vanilla GAN Preprocessing Complete!')
+        print('  Model type: VANILLA GAN')
+        print('  Samples processed: ' + str(len(dataset)))
+        print('  Input dimension: ' + str(input_dim))
+        print('  Image size: ' + str(target_size) + 'x' + str(target_size))
+        print('  Channels: ' + str(channels))
+        print('  Classes: ' + str(len(unique_classes)) + ' (' + str(unique_classes) + ')')
+        " "$0" "$1" "$2" "$3" "$4" "$5" "$6"
     args:
       - {inputPath: train_data}
-      - {inputPath: test_data}
       - {inputPath: dataset_info}
+      - {inputPath: data_config}
       - {inputValue: model_config}
-      - {outputPath: processed_train_data}
-      - {outputPath: processed_test_data}
-      - {outputPath: vanilla_gan_config}
+      - {outputPath: processed_data}
+      - {outputPath: gan_config}
