@@ -19,7 +19,7 @@ outputs:
     description: "Vanilla GAN configuration for training"
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v33
+    image: gurpreetgandhi/nesy-factory:v34
     command:
       - sh
       - -c
