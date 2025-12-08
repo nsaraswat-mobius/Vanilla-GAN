@@ -18,7 +18,7 @@ outputs:
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v34
+    image: gurpreetgandhi/nesy-factory:v35
     command:
       - sh
       - -c
