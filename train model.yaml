@@ -1,0 +1,524 @@
+name: Train Vanilla GAN
+description: Trains Vanilla GAN model using master config with fully connected architecture training
+inputs:
+  - name: initialized_model
+    type: Model
+    description: Built Vanilla GAN model from Build brick
+  - name: preprocessed_data
+    type: Dataset
+    description: Preprocessed dataset from Preprocess brick (flattened)
+  - name: gan_config_json
+    type: String
+    description: Master GAN configuration as JSON string
+outputs:
+  - name: trained_model
+    type: Model
+  - name: training_history
+    type: String
+  - name: training_metrics
+    type: String
+  - name: generated_samples
+    type: Dataset
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v35
+    command:
+      - sh
+      - -c
+      - |
+        pip install torchvision==0.15.2 --quiet
+        echo "Torchvision installed"
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import sys
+        import json
+        import pickle
+        import base64
+        import time
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+        from torch.utils.data import Dataset, DataLoader
+        import numpy as np
+        from PIL import Image
+        import io
+        import math
+        
+        # =============================================================================
+        # DEFINE VanillaGANDataset CLASS FOR FLATTENED DATA
+        # =============================================================================
+        
+        class VanillaGANDataset(Dataset):
+            def __init__(self, data_list, transform=None, target_size=28, channels=1):
+                self.data_list = data_list
+                self.transform = transform
+                self.target_size = target_size
+                self.channels = channels
+                self.input_dim = target_size * target_size * channels
+            
+            def __len__(self):
+                return len(self.data_list)
+            
+            def __getitem__(self, idx):
+                item = self.data_list[idx]
+                try:
+                    img_data = base64.b64decode(item['image_data'])
+                    img = Image.open(io.BytesIO(img_data))
+                    
+                    # Convert to appropriate color mode
+                    if self.channels == 1 and img.mode != 'L':
+                        img = img.convert('L')
+                    elif self.channels == 3 and img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    
+                    # Apply transforms if any
+                    if self.transform:
+                        img = self.transform(img)
+                    
+                    # Flatten the image for vanilla GAN
+                    if isinstance(img, torch.Tensor):
+                        flat_img = img.view(-1)
+                    else:
+                        # Convert PIL to tensor and flatten
+                        img_tensor = torch.tensor(np.array(img)).float() / 255.0 * 2 - 1  # Normalize to [-1, 1]
+                        flat_img = img_tensor.view(-1)
+                    
+                    return flat_img
+                except Exception as e:
+                    print(f"Error processing image {idx}: {e}")
+                    return torch.zeros(self.input_dim)
+        
+        # =============================================================================
+        # MAIN VANILLA GAN TRAINING LOGIC
+        # =============================================================================
+        
+        parser = argparse.ArgumentParser(description='Vanilla GAN Training')
+        parser.add_argument('--initialized_model', type=str, required=True)
+        parser.add_argument('--preprocessed_data', type=str, required=True)
+        parser.add_argument('--gan_config_json', type=str, required=True)
+        parser.add_argument('--trained_model', type=str, required=True)
+        parser.add_argument('--training_history', type=str, required=True)
+        parser.add_argument('--training_metrics', type=str, required=True)
+        parser.add_argument('--generated_samples', type=str, required=True)
+        args = parser.parse_args()
+        
+        print("VANILLA GAN TRAINING STARTING")
+        print("="*60)
+        
+        # Parse configuration
+        gan_config = json.loads(args.gan_config_json)
+        model_config = gan_config.get('model', {})
+        training_config = gan_config.get('training', {})
+        
+        # Vanilla GAN specific settings
+        algorithm = model_config.get('training_algorithm', 'backprop')
+        gan_type = 'vanilla_gan'
+        print(f"Training {gan_type.upper()} with {algorithm.upper()} algorithm")
+        
+        # Load preprocessed data
+        with open(args.preprocessed_data, 'rb') as f:
+            data_wrapper = pickle.load(f)
+        
+        # Handle data format for Vanilla GAN (should be flattened)
+        print(f"Data wrapper type: {type(data_wrapper)}")
+        
+        if isinstance(data_wrapper, dict):
+            # New format from Preprocess brick
+            if 'dataset' in data_wrapper:
+                dataset = data_wrapper['dataset']
+                input_dim = data_wrapper.get('input_dim', 784)
+                image_size = data_wrapper.get('image_size', 28)
+                channels = data_wrapper.get('channels', 1)
+                print(f"Using dataset from data wrapper: {len(dataset)} samples")
+                print(f"Input dimension: {input_dim} (flattened: {image_size}x{image_size}x{channels})")
+            else:
+                raise ValueError("Data wrapper missing 'dataset' key")
+        else:
+            # Direct dataset
+            dataset = data_wrapper
+            input_dim = 784  # Default MNIST size
+            image_size = 28
+            channels = 1
+            print(f"Using direct dataset: {len(dataset)} samples")
+        
+        # Create dataloader
+        batch_size = training_config.get('batch_size', 64)
+        dataloader = DataLoader(
+            dataset, 
+            batch_size=batch_size, 
+            shuffle=True,
+            num_workers=0
+        )
+        
+        # Load model
+        try:
+            with open(args.initialized_model, 'rb') as f:
+                model_data = pickle.load(f)
+            
+            print(f"Model data loaded: {type(model_data)}")
+            
+            # Handle different model formats from build step
+            if hasattr(model_data, 'generator') and hasattr(model_data, 'discriminator'):
+                # Direct model object
+                gan = model_data
+                print("Loaded direct VanillaGAN model")
+            elif hasattr(model_data, 'generator_state') and hasattr(model_data, 'discriminator_state'):
+                # Model wrapper with state dicts
+                print("Loaded VanillaGAN wrapper, reconstructing model...")
+                
+                # Recreate the model architecture
+                class VanillaGenerator(nn.Module):
+                    def __init__(self, latent_dim, output_dim, hidden_layers=[256, 512, 1024]):
+                        super(VanillaGenerator, self).__init__()
+                        self.latent_dim = latent_dim
+                        self.output_dim = output_dim
+                        
+                        layers = []
+                        current_dim = latent_dim
+                        
+                        for hidden_dim in hidden_layers:
+                            layers.append(nn.Linear(current_dim, hidden_dim))
+                            layers.append(nn.ReLU())
+                            current_dim = hidden_dim
+                        
+                        layers.append(nn.Linear(current_dim, output_dim))
+                        layers.append(nn.Tanh())
+                        
+                        self.model = nn.Sequential(*layers)
+                    
+                    def forward(self, z):
+                        return self.model(z)
+                
+                class VanillaDiscriminator(nn.Module):
+                    def __init__(self, input_dim, hidden_layers=[1024, 512, 256]):
+                        super(VanillaDiscriminator, self).__init__()
+                        self.input_dim = input_dim
+                        
+                        layers = []
+                        current_dim = input_dim
+                        
+                        for hidden_dim in hidden_layers:
+                            layers.append(nn.Linear(current_dim, hidden_dim))
+                            layers.append(nn.LeakyReLU(0.2))
+                            layers.append(nn.Dropout(0.3))
+                            current_dim = hidden_dim
+                        
+                        layers.append(nn.Linear(current_dim, 1))
+                        layers.append(nn.Sigmoid())
+                        
+                        self.model = nn.Sequential(*layers)
+                    
+                    def forward(self, x):
+                        return self.model(x)
+                
+                # Reconstruct model
+                config = model_data.config
+                generator = VanillaGenerator(
+                    config.get('latent_dim', 100),
+                    config.get('input_dim', 784),
+                    config.get('generator_layers', [256, 512, 1024])
+                )
+                discriminator = VanillaDiscriminator(
+                    config.get('input_dim', 784),
+                    config.get('discriminator_layers', [1024, 512, 256])
+                )
+                
+                # Load state dicts
+                generator.load_state_dict(model_data.generator_state)
+                discriminator.load_state_dict(model_data.discriminator_state)
+                
+                # Create simple GAN wrapper
+                class SimpleVanillaGAN:
+                    def __init__(self, generator, discriminator, config):
+                        self.generator = generator
+                        self.discriminator = discriminator
+                        self.config = config
+                        self.device = torch.device(config.get('device', 'cpu'))
+                        
+                        # Create optimizers
+                        lr = config.get('lr', 0.0002)
+                        self.g_optimizer = torch.optim.Adam(generator.parameters(), lr=lr, betas=(0.5, 0.999))
+                        self.d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=lr, betas=(0.5, 0.999))
+                        self.criterion = nn.BCELoss()
+                
+                gan = SimpleVanillaGAN(generator, discriminator, config)
+                
+            elif isinstance(model_data, dict) and 'config' in model_data:
+                # State dict format
+                print("Found state dict format, reconstructing model...")
+                raise NotImplementedError("State dict reconstruction not implemented")
+                
+            else:
+                raise ValueError(f"Unknown model format: {type(model_data)}")
+                
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+        
+        # Setup device and move model
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {device}")
+        
+        # Move model to device
+        gan.generator.to(device)
+        gan.discriminator.to(device)
+        
+        # Get training parameters
+        epochs = training_config.get('epochs', 200)
+        latent_dim = model_config.get('latent_dim', 100)
+        
+        print(f"\\nStarting Vanilla GAN training...")
+        print(f"Epochs: {epochs}")
+        print(f"Batch size: {batch_size}")
+        print(f"Latent dim: {latent_dim}")
+        print(f"Input dim: {input_dim}")
+        
+        # Initialize training history
+        training_history = {
+            'epochs_completed': 0,
+            'losses_g': [],
+            'losses_d': [],
+            'real_scores': [],
+            'fake_scores': [],
+            'algorithm': algorithm,
+            'timestamps': []
+        }
+        
+        # VANILLA GAN TRAINING LOOP
+        for epoch in range(epochs):
+            epoch_start = time.time()
+            epoch_g_losses = []
+            epoch_d_losses = []
+            epoch_real_scores = []
+            epoch_fake_scores = []
+            
+            for batch_idx, real_data in enumerate(dataloader):
+                current_batch_size = real_data.size(0)
+                real_data = real_data.to(device)
+                
+                # Labels for real and fake
+                real_labels = torch.ones(current_batch_size, 1, device=device)
+                fake_labels = torch.zeros(current_batch_size, 1, device=device)
+                
+                # =============
+                # Train Discriminator
+                # =============
+                gan.d_optimizer.zero_grad()
+                
+                # Real data
+                real_output = gan.discriminator(real_data)
+                d_loss_real = gan.criterion(real_output, real_labels)
+                
+                # Fake data
+                noise = torch.randn(current_batch_size, latent_dim, device=device)
+                fake_data = gan.generator(noise).detach()  # Detach to avoid training generator
+                fake_output = gan.discriminator(fake_data)
+                d_loss_fake = gan.criterion(fake_output, fake_labels)
+                
+                # Total discriminator loss
+                d_loss = d_loss_real + d_loss_fake
+                d_loss.backward()
+                gan.d_optimizer.step()
+                
+                # =============
+                # Train Generator
+                # =============
+                gan.g_optimizer.zero_grad()
+                
+                # Generate fake data (don't detach this time)
+                noise = torch.randn(current_batch_size, latent_dim, device=device)
+                fake_data = gan.generator(noise)
+                fake_output = gan.discriminator(fake_data)
+                
+                # Generator loss (wants discriminator to think fake data is real)
+                g_loss = gan.criterion(fake_output, real_labels)
+                g_loss.backward()
+                gan.g_optimizer.step()
+                
+                # Record batch statistics
+                epoch_g_losses.append(g_loss.item())
+                epoch_d_losses.append(d_loss.item())
+                epoch_real_scores.append(real_output.mean().item())
+                epoch_fake_scores.append(fake_output.mean().item())
+                
+                # Print progress occasionally
+                if batch_idx % 50 == 0:
+                    print(f"Epoch [{epoch+1}/{epochs}] Batch [{batch_idx}/{len(dataloader)}] "
+                          f"G Loss: {g_loss.item():.4f} D Loss: {d_loss.item():.4f} "
+                          f"Real Score: {real_output.mean().item():.3f} "
+                          f"Fake Score: {fake_output.mean().item():.3f}")
+            
+            # Record epoch statistics
+            avg_g_loss = np.mean(epoch_g_losses)
+            avg_d_loss = np.mean(epoch_d_losses)
+            avg_real_score = np.mean(epoch_real_scores)
+            avg_fake_score = np.mean(epoch_fake_scores)
+            
+            training_history['losses_g'].append(float(avg_g_loss))
+            training_history['losses_d'].append(float(avg_d_loss))
+            training_history['real_scores'].append(float(avg_real_score))
+            training_history['fake_scores'].append(float(avg_fake_score))
+            training_history['timestamps'].append(time.time())
+            
+            epoch_time = time.time() - epoch_start
+            
+            print(f"\\nEpoch {epoch+1}/{epochs} completed:")
+            print(f"  Average G Loss: {avg_g_loss:.4f}")
+            print(f"  Average D Loss: {avg_d_loss:.4f}")
+            print(f"  Average Real Score: {avg_real_score:.3f}")
+            print(f"  Average Fake Score: {avg_fake_score:.3f}")
+            print(f"  Time: {epoch_time:.2f}s")
+            print("-" * 50)
+        
+        training_history['epochs_completed'] = epochs
+        
+        # GENERATE SAMPLES FOR EVALUATION
+        print("\\nGenerating evaluation samples")
+        generated_samples = []
+        num_samples = min(16, training_config.get('num_samples', 16))
+        
+        gan.generator.eval()
+        with torch.no_grad():
+            for i in range(num_samples):
+                # Generate latent vector
+                z = torch.randn(1, latent_dim, device=device)
+                
+                # Generate flattened image
+                fake_flat = gan.generator(z).cpu()
+                
+                # Reshape to image dimensions
+                fake_img = fake_flat.view(1, channels, image_size, image_size)
+                
+                # Convert to image (denormalize from [-1,1] to [0,255])
+                if channels == 1:  # Grayscale
+                    img_np = (fake_img.squeeze(0).squeeze(0).numpy() + 1) / 2 * 255
+                    img_np = np.clip(img_np, 0, 255)
+                    img_pil = Image.fromarray(img_np.astype(np.uint8), mode='L')
+                else:  # RGB
+                    img_np = (fake_img.squeeze(0).permute(1, 2, 0).numpy() + 1) / 2 * 255
+                    img_np = np.clip(img_np, 0, 255)
+                    img_pil = Image.fromarray(img_np.astype(np.uint8), mode='RGB')
+                
+                # Convert to base64
+                img_bytes = io.BytesIO()
+                img_pil.save(img_bytes, format='PNG')
+                base64_data = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
+                
+                generated_samples.append({
+                    'sample_id': i,
+                    'image_data': base64_data,
+                    'model_type': 'vanilla_gan',
+                    'algorithm': algorithm,
+                    'epoch': epochs,
+                    'image_size': image_size,
+                    'channels': channels,
+                    'filename': f'vanilla_gan_sample_{i}.png'
+                })
+        
+        print(f"Generated {len(generated_samples)} samples")
+        
+        # CALCULATE FINAL METRICS
+        training_metrics = {
+            'model_type': 'vanilla_gan',
+            'training_algorithm': algorithm,
+            'architecture': 'fully_connected',
+            'epochs_completed': epochs,
+            'final_generator_loss': training_history['losses_g'][-1] if training_history['losses_g'] else 1.0,
+            'final_discriminator_loss': training_history['losses_d'][-1] if training_history['losses_d'] else 1.0,
+            'avg_generator_loss': np.mean(training_history['losses_g']) if training_history['losses_g'] else 1.0,
+            'avg_discriminator_loss': np.mean(training_history['losses_d']) if training_history['losses_d'] else 1.0,
+            'final_real_score': training_history['real_scores'][-1] if training_history['real_scores'] else 0.5,
+            'final_fake_score': training_history['fake_scores'][-1] if training_history['fake_scores'] else 0.5,
+            'training_time': training_history['timestamps'][-1] - training_history['timestamps'][0] if len(training_history['timestamps']) > 1 else 0,
+            'samples_generated': len(generated_samples),
+            'training_success': True,
+            'input_dim': input_dim,
+            'latent_dim': latent_dim,
+            'image_size': image_size,
+            'channels': channels,
+            'batch_size': batch_size,
+            'convergence_info': {
+                'generator_converged': training_history['losses_g'][-1] < 2.0 if training_history['losses_g'] else False,
+                'discriminator_converged': training_history['losses_d'][-1] < 2.0 if training_history['losses_d'] else False,
+                'scores_balanced': abs(training_history['real_scores'][-1] - 0.5) < 0.3 and abs(training_history['fake_scores'][-1] - 0.5) < 0.3 if training_history['real_scores'] and training_history['fake_scores'] else False
+            }
+        }
+        
+        # SAVE ALL OUTPUTS
+        print("\\nSaving training outputs...")
+        
+        # Save trained model
+        os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
+        try:
+            with open(args.trained_model, 'wb') as f:
+                pickle.dump(gan, f)
+            print(f"Trained model saved: {args.trained_model}")
+        except Exception as e:
+            print(f"Error saving model: {e}")
+            # Save minimal state
+            model_state = {
+                'model_type': 'vanilla_gan',
+                'algorithm': algorithm,
+                'training_completed': True,
+                'final_losses': {
+                    'generator': training_history['losses_g'][-1] if training_history['losses_g'] else 1.0,
+                    'discriminator': training_history['losses_d'][-1] if training_history['losses_d'] else 1.0
+                }
+            }
+            with open(args.trained_model, 'wb') as f:
+                pickle.dump(model_state, f)
+            print(f"Model state saved: {args.trained_model}")
+        
+        # Save training history
+        os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
+        with open(args.training_history, 'w') as f:
+            json.dump(training_history, f, indent=2)
+        print(f"Training history saved: {args.training_history}")
+        
+        # Save training metrics
+        os.makedirs(os.path.dirname(args.training_metrics), exist_ok=True)
+        with open(args.training_metrics, 'w') as f:
+            json.dump(training_metrics, f, indent=2)
+        print(f"Training metrics saved: {args.training_metrics}")
+        
+        # Save generated samples
+        os.makedirs(os.path.dirname(args.generated_samples), exist_ok=True)
+        with open(args.generated_samples, 'wb') as f:
+            pickle.dump(generated_samples, f)
+        print(f"Generated samples saved: {args.generated_samples}")
+        
+        print("="*60)
+        print("VANILLA GAN TRAINING COMPLETED SUCCESSFULLY!")
+        print(f"Algorithm: {algorithm}")
+        print(f"Epochs: {epochs}")
+        print(f"Final G Loss: {training_metrics['final_generator_loss']:.4f}")
+        print(f"Final D Loss: {training_metrics['final_discriminator_loss']:.4f}")
+        print(f"Final Real Score: {training_metrics['final_real_score']:.3f}")
+        print(f"Final Fake Score: {training_metrics['final_fake_score']:.3f}")
+        print(f"Samples generated: {len(generated_samples)}")
+        print(f"Training time: {training_metrics['training_time']:.2f}s")
+        print("="*60)
+
+    args:
+      - --initialized_model
+      - {inputPath: initialized_model}
+      - --preprocessed_data
+      - {inputPath: preprocessed_data}
+      - --gan_config_json
+      - {inputValue: gan_config_json}
+      - --trained_model
+      - {outputPath: trained_model}
+      - --training_history
+      - {outputPath: training_history}
+      - --training_metrics
+      - {outputPath: training_metrics}
+      - --generated_samples
+      - {outputPath: generated_samples}
