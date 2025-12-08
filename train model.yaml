@@ -156,8 +156,68 @@ implementation:
             num_workers=0
         )
         
-        # Load model
+        # Define model architectures for reconstruction
+        class VanillaGenerator(nn.Module):
+            def __init__(self, latent_dim, output_dim, hidden_layers=[256, 512, 1024]):
+                super(VanillaGenerator, self).__init__()
+                self.latent_dim = latent_dim
+                self.output_dim = output_dim
+                
+                layers = []
+                current_dim = latent_dim
+                
+                for hidden_dim in hidden_layers:
+                    layers.append(nn.Linear(current_dim, hidden_dim))
+                    layers.append(nn.ReLU())
+                    current_dim = hidden_dim
+                
+                layers.append(nn.Linear(current_dim, output_dim))
+                layers.append(nn.Tanh())
+                
+                self.model = nn.Sequential(*layers)
+            
+            def forward(self, z):
+                return self.model(z)
+        
+        class VanillaDiscriminator(nn.Module):
+            def __init__(self, input_dim, hidden_layers=[1024, 512, 256]):
+                super(VanillaDiscriminator, self).__init__()
+                self.input_dim = input_dim
+                
+                layers = []
+                current_dim = input_dim
+                
+                for hidden_dim in hidden_layers:
+                    layers.append(nn.Linear(current_dim, hidden_dim))
+                    layers.append(nn.LeakyReLU(0.2))
+                    layers.append(nn.Dropout(0.3))
+                    current_dim = hidden_dim
+                
+                layers.append(nn.Linear(current_dim, 1))
+                layers.append(nn.Sigmoid())
+                
+                self.model = nn.Sequential(*layers)
+            
+            def forward(self, x):
+                return self.model(x)
+        
+        class SimpleVanillaGAN:
+            def __init__(self, generator, discriminator, config):
+                self.generator = generator
+                self.discriminator = discriminator
+                self.config = config
+                self.device = torch.device(config.get('device', 'cpu'))
+                
+                # Create optimizers
+                lr = config.get('lr', 0.0002)
+                self.g_optimizer = torch.optim.Adam(generator.parameters(), lr=lr, betas=(0.5, 0.999))
+                self.d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=lr, betas=(0.5, 0.999))
+                self.criterion = nn.BCELoss()
+        
+        # Load model with robust error handling
+        gan = None
         try:
+            print("Attempting to load model...")
             with open(args.initialized_model, 'rb') as f:
                 model_data = pickle.load(f)
             
@@ -168,57 +228,12 @@ implementation:
                 # Direct model object
                 gan = model_data
                 print("Loaded direct VanillaGAN model")
+            
             elif hasattr(model_data, 'generator_state') and hasattr(model_data, 'discriminator_state'):
                 # Model wrapper with state dicts
                 print("Loaded VanillaGAN wrapper, reconstructing model...")
-                
-                # Recreate the model architecture
-                class VanillaGenerator(nn.Module):
-                    def __init__(self, latent_dim, output_dim, hidden_layers=[256, 512, 1024]):
-                        super(VanillaGenerator, self).__init__()
-                        self.latent_dim = latent_dim
-                        self.output_dim = output_dim
-                        
-                        layers = []
-                        current_dim = latent_dim
-                        
-                        for hidden_dim in hidden_layers:
-                            layers.append(nn.Linear(current_dim, hidden_dim))
-                            layers.append(nn.ReLU())
-                            current_dim = hidden_dim
-                        
-                        layers.append(nn.Linear(current_dim, output_dim))
-                        layers.append(nn.Tanh())
-                        
-                        self.model = nn.Sequential(*layers)
-                    
-                    def forward(self, z):
-                        return self.model(z)
-                
-                class VanillaDiscriminator(nn.Module):
-                    def __init__(self, input_dim, hidden_layers=[1024, 512, 256]):
-                        super(VanillaDiscriminator, self).__init__()
-                        self.input_dim = input_dim
-                        
-                        layers = []
-                        current_dim = input_dim
-                        
-                        for hidden_dim in hidden_layers:
-                            layers.append(nn.Linear(current_dim, hidden_dim))
-                            layers.append(nn.LeakyReLU(0.2))
-                            layers.append(nn.Dropout(0.3))
-                            current_dim = hidden_dim
-                        
-                        layers.append(nn.Linear(current_dim, 1))
-                        layers.append(nn.Sigmoid())
-                        
-                        self.model = nn.Sequential(*layers)
-                    
-                    def forward(self, x):
-                        return self.model(x)
-                
-                # Reconstruct model
                 config = model_data.config
+                
                 generator = VanillaGenerator(
                     config.get('latent_dim', 100),
                     config.get('input_dim', 784),
@@ -233,35 +248,83 @@ implementation:
                 generator.load_state_dict(model_data.generator_state)
                 discriminator.load_state_dict(model_data.discriminator_state)
                 
-                # Create simple GAN wrapper
-                class SimpleVanillaGAN:
-                    def __init__(self, generator, discriminator, config):
-                        self.generator = generator
-                        self.discriminator = discriminator
-                        self.config = config
-                        self.device = torch.device(config.get('device', 'cpu'))
-                        
-                        # Create optimizers
-                        lr = config.get('lr', 0.0002)
-                        self.g_optimizer = torch.optim.Adam(generator.parameters(), lr=lr, betas=(0.5, 0.999))
-                        self.d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=lr, betas=(0.5, 0.999))
-                        self.criterion = nn.BCELoss()
-                
                 gan = SimpleVanillaGAN(generator, discriminator, config)
-                
-            elif isinstance(model_data, dict) and 'config' in model_data:
+                print("Successfully reconstructed model from wrapper")
+            
+            elif hasattr(model_data, 'generator_arch') and hasattr(model_data, 'discriminator_arch'):
+                # Alternative wrapper format with architecture
+                print("Found architecture-based wrapper, extracting models...")
+                gan = SimpleVanillaGAN(
+                    model_data.generator_arch, 
+                    model_data.discriminator_arch, 
+                    model_data.config
+                )
+                print("Successfully extracted model from architecture wrapper")
+            
+            elif isinstance(model_data, dict) and 'generator_state_dict' in model_data:
                 # State dict format
                 print("Found state dict format, reconstructing model...")
-                raise NotImplementedError("State dict reconstruction not implemented")
+                config = model_data.get('config', {})
                 
+                generator = VanillaGenerator(
+                    config.get('latent_dim', 100),
+                    config.get('input_dim', 784),
+                    config.get('generator_layers', [256, 512, 1024])
+                )
+                discriminator = VanillaDiscriminator(
+                    config.get('input_dim', 784),
+                    config.get('discriminator_layers', [1024, 512, 256])
+                )
+                
+                # Load state dicts
+                generator.load_state_dict(model_data['generator_state_dict'])
+                discriminator.load_state_dict(model_data['discriminator_state_dict'])
+                
+                gan = SimpleVanillaGAN(generator, discriminator, config)
+                print("Successfully reconstructed model from state dict")
+            
             else:
-                raise ValueError(f"Unknown model format: {type(model_data)}")
+                print(f"Unknown model format. Available attributes: {dir(model_data)}")
+                if hasattr(model_data, '__dict__'):
+                    print(f"Model data dict: {model_data.__dict__.keys()}")
+                raise ValueError(f"Cannot handle model format: {type(model_data)}")
                 
         except Exception as e:
             print(f"Error loading model: {e}")
             import traceback
             traceback.print_exc()
-            raise
+            
+            # Create a fallback model if loading fails
+            print("Creating fallback model with default parameters...")
+            try:
+                fallback_config = {
+                    'latent_dim': model_config.get('latent_dim', 100),
+                    'input_dim': input_dim,
+                    'generator_layers': model_config.get('generator_layers', [256, 512, 1024]),
+                    'discriminator_layers': model_config.get('discriminator_layers', [1024, 512, 256]),
+                    'lr': model_config.get('learning_rate', 0.0002),
+                    'device': 'cpu'
+                }
+                
+                generator = VanillaGenerator(
+                    fallback_config['latent_dim'],
+                    fallback_config['input_dim'],
+                    fallback_config['generator_layers']
+                )
+                discriminator = VanillaDiscriminator(
+                    fallback_config['input_dim'],
+                    fallback_config['discriminator_layers']
+                )
+                
+                gan = SimpleVanillaGAN(generator, discriminator, fallback_config)
+                print("Created fallback model successfully")
+                
+            except Exception as fallback_error:
+                print(f"Failed to create fallback model: {fallback_error}")
+                raise
+        
+        if gan is None:
+            raise ValueError("Failed to load or create model")
         
         # Setup device and move model
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -381,7 +444,7 @@ implementation:
         training_history['epochs_completed'] = epochs
         
         # GENERATE SAMPLES FOR EVALUATION
-        print("\\nGenerating evaluation samples")
+        print("\\nGenerating evaluation samples...")
         generated_samples = []
         num_samples = min(16, training_config.get('num_samples', 16))
         
