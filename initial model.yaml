@@ -1,235 +1,266 @@
-name: Initialize GAN Model
-description: Initializes GAN based on configuration.
+name: Build
+description: Builds GAN model using master config
 inputs:
-  - name: gan_config
+  - name: gan_config_base64
     type: String
-    description: "GAN configuration
+    description: Master GAN configuration 
+  - name: model_name
+    type: String
+    description: Model name 
 outputs:
-  - name: model
+  - name: model_out
     type: Model
-  - name: init_config
+  - name: gan_config_base64_updated
     type: String
-    description: "Initialization configuration"
+    description: Updated master GAN configuration 
+  - name: model_info
+    type: String
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v33
+    image: gurpreetgandhi/nesy-factory:v34
     command:
       - sh
       - -c
       - |
-        # Install torchvision compatible with nesy-factory requirements
-        # nesy-factory 1.0.0 requires torch<2.3.0,>=2.0.0
-        # So we install torchvision 0.15.2 which is compatible with torch 2.0.0-2.2.0
-        pip install torchvision==0.15.2 --no-deps --quiet
+        pip install torchvision==0.15.2 --quiet
+        echo "Torchvision installed"
         exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
-        import sys, os, pickle, json, torch, argparse
+        import argparse
+        import os
+        import json
+        import pickle
+        import base64
+        import traceback
+        import sys
         
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--gan_config', type=str, required=True)
-        parser.add_argument('--model_path', type=str, required=True)
-        parser.add_argument('--init_config_path', type=str, required=True)
+        parser = argparse.ArgumentParser(description='GAN Model Builder')
+        parser.add_argument('--gan_config_base64', type=str, required=True, help='Master GAN config (base64)')
+        parser.add_argument('--model_name', type=str, required=True, help='Model name (dcgan or vanilla_gan)')
+        parser.add_argument('--model_out', type=str, required=True, help='Output path for model')
+        parser.add_argument('--gan_config_base64_updated', type=str, required=True, help='Output path for updated config (base64)')
+        parser.add_argument('--model_info', type=str, required=True, help='Output path for model info')
         args = parser.parse_args()
         
-        print('Starting GAN Model Initialization')
+        print("GAN MODEL BUILDER STARTING")
+        print("="*60)
+        print(f"gan_config_base64 length: {len(args.gan_config_base64)}")
+        print(f"model_name: {args.model_name}")
         
-        # Parse GAN configuration
-        gan_config_str = args.gan_config
-        print(f'GAN config received, length: {len(gan_config_str)}')
-        print(f'GAN Config preview: {gan_config_str[:100]}...')
+        # Decode base64 config
+        try:
+            config_json = base64.b64decode(args.gan_config_base64).decode('utf-8')
+            gan_config = json.loads(config_json)
+            print("Master GAN config decoded successfully")
+        except Exception as e:
+            print(f"Failed to decode base64 config: {e}")
+            sys.exit(1)
+        
+        model_config = gan_config.get('model', {})
+        
+        # Override model type if specified
+        if args.model_name.lower() in ['dcgan', 'vanilla_gan']:
+            model_config['gan_type'] = args.model_name.lower()
+        
+        model_type = model_config.get('gan_type', 'dcgan')
+        print(f"Building {model_type.upper()} model")
+        
+        # Import torch
+        try:
+            import torch
+            print(f"PyTorch version: {torch.__version__}")
+            print(f"CUDA available: {torch.cuda.is_available()}")
+        except ImportError as e:
+            print(f"Failed to import torch: {e}")
+            sys.exit(1)
+        
+        model = None
         
         try:
-            gan_config = json.loads(gan_config_str)
-            print('Direct JSON parse successful')
-        except json.JSONDecodeError as e:
-            print(f'JSON parse error: {e}')
-            try:
-                cleaned = gan_config_str.strip()
-                if cleaned.startswith('"') and cleaned.endswith('"'):
-                    cleaned = cleaned[1:-1]
-                cleaned = cleaned.replace('\\"', '"').replace('\\\\"', '"')
-                gan_config = json.loads(cleaned)
-                print('Parsed after cleaning')
-            except Exception as e2:
-                print(f'Failed to parse config after cleaning: {e2}')
-                raise ValueError("Invalid JSON configuration")
-        
-        # Determine model type
-        model_type = gan_config.get('model_type', 'vanilla_gan').lower()
-        is_dcgan = model_type == 'dcgan'
-        is_vanilla_gan = model_type == 'vanilla_gan'
-        
-        if not (is_dcgan or is_vanilla_gan):
-            raise ValueError(f"Unknown model type: {model_type}. Must be 'dcgan' or 'vanilla_gan'")
-        
-        print(f'{model_type.upper()} Configuration:')
-        if is_vanilla_gan:
-            print(f'  Input Dimension: {gan_config.get("input_dim", 784)}')
-        else:
-            print(f'  Image Size: {gan_config.get("image_size", 64)}')
-        print(f'  Channels: {gan_config.get("channels", 3)}')
-        print(f'  Latent Dim: {gan_config.get("latent_dim", 100)}')
-        print(f'  Training Algorithm: {gan_config.get("training_algorithm", "backprop")}')
-        
-        # Import GAN models based on type
-        gan_model = None
-        
-        if is_dcgan:
-            print('Importing DCGAN...')
-            try:
+            if model_type == 'dcgan':
                 from nesy_factory.GANs.dcgan import DCGAN, DCGANConfig
-                print('DCGAN imported successfully')
-            except ImportError as e:
-                print(f'DCGAN import error: {e}')
-                raise
-            
-            print('Creating DCGAN model...')
-            dcgan_config_dict = {
-                'image_size': gan_config.get('image_size', 64),
-                'channels': gan_config.get('channels', 3),
-                'latent_dim': gan_config.get('latent_dim', 100),
-                'training_algorithm': gan_config.get('training_algorithm', 'backprop'),
-                'use_forward_forward': gan_config.get('training_algorithm', '').lower() == 'forward_forward',
-                'use_cafo': gan_config.get('training_algorithm', '').lower() == 'cafo',
-                'batch_size': gan_config.get('batch_size', 32),
-                'learning_rate': gan_config.get('learning_rate', 0.0002),
-                'beta1': 0.5,
-                'epochs': gan_config.get('epochs', 50),
-                'device': 'cuda' if torch.cuda.is_available() else 'cpu'
-            }
-            
-            if 'generator_layers' in gan_config and gan_config['generator_layers']:
-                dcgan_config_dict['generator_layers'] = gan_config['generator_layers']
-            
-            if 'discriminator_layers' in gan_config and gan_config['discriminator_layers']:
-                dcgan_config_dict['discriminator_layers'] = gan_config['discriminator_layers']
-            
-            print(f'DCGAN config: {dcgan_config_dict}')
-            
-            try:
+                
+                dcgan_config_dict = {
+                    'image_size': model_config.get('image_size', 64),
+                    'channels': model_config.get('channels', 3),
+                    'latent_dim': model_config.get('latent_dim', 100),
+                    'training_algorithm': model_config.get('training_algorithm', 'backprop'),
+                    'batch_size': model_config.get('batch_size', 32),
+                    'learning_rate': model_config.get('learning_rate', 0.0002),
+                    'epochs': model_config.get('epochs', 50),
+                    'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+                }
+                
+                print(f"DCGAN config created")
                 dcgan_config = DCGANConfig(**dcgan_config_dict)
-                gan_model = DCGAN(dcgan_config)
-                print('DCGAN model created successfully')
-            except Exception as e:
-                print(f'Error creating DCGAN: {e}')
-                import traceback
-                traceback.print_exc()
-                raise
-        
-        elif is_vanilla_gan:
-            print('Importing VanillaGAN...')
-            try:
+                model = DCGAN(dcgan_config)
+                print("DCGAN created successfully")
+                
+            elif model_type == 'vanilla_gan':
                 from nesy_factory.GANs.vanilla_gan import VanillaGAN, VanillaGANConfig
-                print('VanillaGAN imported successfully')
-            except ImportError as e:
-                print(f'VanillaGAN import error: {e}')
                 
-                # Check if nesy_factory is available at all
-                try:
-                    import nesy_factory
-                    print(f'nesy_factory found at: {nesy_factory.__file__}')
-                    print(f'nesy_factory version: {getattr(nesy_factory, "__version__", "unknown")}')
-                    
-                    # Try to see what's available in nesy_factory.GANs
-                    try:
-                        import nesy_factory.GANs as gans
-                        print(f'GANs module found: {dir(gans)}')
-                    except ImportError as gans_error:
-                        print(f'GANs module not found: {gans_error}')
-                    
-                except ImportError:
-                    print('nesy_factory package not found in container')
+                vanilla_config_dict = {
+                    'input_dim': model_config.get('input_dim', 784),
+                    'latent_dim': model_config.get('latent_dim', 100),
+                    'training_algorithm': model_config.get('training_algorithm', 'backprop'),
+                    'generator_layers': model_config.get('generator_layers', [256, 512, 1024]),
+                    'discriminator_layers': model_config.get('discriminator_layers', [1024, 512, 256]),
+                    'generator_activation': model_config.get('generator_activation', 'relu'),
+                    'discriminator_activation': model_config.get('discriminator_activation', 'leaky_relu'),
+                    'output_activation': model_config.get('output_activation', 'tanh'),
+                    'generator_dropout': model_config.get('generator_dropout', 0.0),
+                    'discriminator_dropout': model_config.get('discriminator_dropout', 0.3),
+                    'batch_size': model_config.get('batch_size', 64),
+                    'lr': model_config.get('learning_rate', 0.0002),
+                    'beta1': model_config.get('beta1', 0.5),
+                    'beta2': model_config.get('beta2', 0.999),
+                    'epochs': model_config.get('epochs', 100),
+                    'ff_blocks': model_config.get('ff_blocks', 3),
+                    'ff_epochs_per_block': model_config.get('ff_epochs_per_block', 100),
+                    'ff_theta': model_config.get('ff_theta', 2.0),
+                    'ff_positive_margin': model_config.get('ff_positive_margin', 2.0),
+                    'ff_negative_margin': model_config.get('ff_negative_margin', 0.0),
+                    'cafo_blocks': model_config.get('cafo_blocks', 3),
+                    'epochs_per_block': model_config.get('epochs_per_block', 50),
+                    'block_lr': model_config.get('block_lr', 0.001),
+                    'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+                    'sample_interval': model_config.get('sample_interval', 1000),
+                    'save_interval': model_config.get('save_interval', 10000),
+                    'log_interval': model_config.get('log_interval', 100),
+                }
                 
-                # Fallback: try alternative import methods
-                try:
-                    import importlib
-                    
-                    vanilla_gan_module = importlib.import_module('nesy_factory.GANs.vanilla_gan')
-                    
-                    VanillaGAN = vanilla_gan_module.VanillaGAN
-                    VanillaGANConfig = vanilla_gan_module.VanillaGANConfig
-                    
-                    print('VanillaGAN imported via importlib from nesy-factory')
-                    
-                except ImportError as e2:
-                    print(f'All import methods failed. Final error: {e2}')
-                    print('Available Python packages:')
-                    import pkg_resources
-                    installed_packages = [d.project_name for d in pkg_resources.working_set]
-                    print([pkg for pkg in installed_packages if 'nesy' in pkg.lower()])
-                    raise ImportError(f'VanillaGAN not available in nesy-factory Docker container')
-            
-            print('Creating Vanilla GAN model...')
-            vanilla_config_dict = {
-                'input_dim': gan_config.get('input_dim', 784),
-                'latent_dim': gan_config.get('latent_dim', 100),
-                'training_algorithm': gan_config.get('training_algorithm', 'backprop'),
-                'use_forward_forward': gan_config.get('training_algorithm', '').lower() == 'forward_forward',
-                'use_cafo': gan_config.get('training_algorithm', '').lower() == 'cafo',
-                'generator_layers': gan_config.get('generator_layers', [256, 512, 1024]),
-                'discriminator_layers': gan_config.get('discriminator_layers', [1024, 512, 256]),
-                'batch_size': gan_config.get('batch_size', 32),
-                'lr': gan_config.get('learning_rate', 0.0002),
-                'beta1': gan_config.get('beta1', 0.5),
-                'beta2': gan_config.get('beta2', 0.999),
-                'epochs': gan_config.get('epochs', 100),
-                'device': 'cuda' if torch.cuda.is_available() else 'cpu'
-            }
-            
-            print(f'Vanilla GAN config: {vanilla_config_dict}')
-            
-            try:
+                print(f"VanillaGAN config created with parameters:")
+                for key, value in vanilla_config_dict.items():
+                    print(f"  {key}: {value}")
+                
                 vanilla_config = VanillaGANConfig(**vanilla_config_dict)
-                gan_model = VanillaGAN(vanilla_config)
-                print('Vanilla GAN model created successfully')
-            except Exception as e:
-                print(f'Error creating Vanilla GAN: {e}')
-                import traceback
-                traceback.print_exc()
-                raise
+                
+                # Validate configuration
+                is_valid, warnings = vanilla_config.validate()
+                if not is_valid:
+                    print(f"Configuration validation failed: {warnings}")
+                    sys.exit(1)
+                if warnings:
+                    print(f"Configuration warnings: {warnings}")
+                
+                model = VanillaGAN(vanilla_config)
+                print("VanillaGAN created successfully")
+                print(f"Training algorithm: {vanilla_config.training_algorithm.value}")
+                print(f"Generator: {type(model.generator).__name__}")
+                print(f"Discriminator: {type(model.discriminator).__name__}")
+                print(f"Trainer: {type(model.trainer).__name__}")
+                
+        except Exception as e:
+            print(f"Failed to create model: {e}")
+            traceback.print_exc()
+            sys.exit(1)
         
-        if gan_model is None:
-            raise RuntimeError(f"Failed to create {model_type.upper()} model")
+        if model is None:
+            print("Model creation failed")
+            sys.exit(1)
         
-        # Save model
-        output_dir = os.path.dirname(args.model_path)
-        if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir, exist_ok=True)
+        # Test model
+        print("Testing model...")
+        try:
+            if model_type == 'dcgan':
+                z = torch.randn(2, model_config.get('latent_dim', 100), 1, 1)
+            else:
+                # VanillaGAN uses 2D latent vectors (batch_size, latent_dim)
+                z = torch.randn(2, model_config.get('latent_dim', 100))
+            
+            if hasattr(model, 'generator'):
+                with torch.no_grad():
+                    samples = model.generator(z)
+                print(f"Generator test passed. Output shape: {samples.shape}")
+                
+                # Additional test for VanillaGAN discriminator
+                if model_type == 'vanilla_gan':
+                    with torch.no_grad():
+                        disc_pred = model.discriminator(samples)
+                    print(f"Discriminator test passed. Output shape: {disc_pred.shape}")
+        except Exception as e:
+            print(f"Model test warning: {e}")
+            traceback.print_exc()
         
-        with open(args.model_path, 'wb') as f:
-            pickle.dump(gan_model, f)
-        print(f'Model saved to: {args.model_path}')
+        # Update master config
+        import time
+        gan_config['model'].update({
+            'model_built': True,
+            'model_class': type(model).__name__,
+            'latent_dim': model_config.get('latent_dim', 100),
+            'model_type': model_type
+        })
         
-        # Save initialization config
-        init_config = {
-            'model_created': True,
+        # Add VanillaGAN specific info to config
+        if model_type == 'vanilla_gan':
+            gan_config['model'].update({
+                'input_dim': model_config.get('input_dim', 784),
+                'training_algorithm': model_config.get('training_algorithm', 'backprop'),
+                'generator_layers': model_config.get('generator_layers', [256, 512, 1024]),
+                'discriminator_layers': model_config.get('discriminator_layers', [1024, 512, 256])
+            })
+        
+        gan_config['metadata'].update({
+            'built_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'build_step': 'completed'
+        })
+        
+        # Create model info
+        model_info_data = {
             'model_type': model_type,
-            'success': True,
-            'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-            'original_config': gan_config
+            'model_name': args.model_name,
+            'build_status': 'success',
+            'config': model_config,
+            'model_class': type(model).__name__
         }
         
-        output_dir_config = os.path.dirname(args.init_config_path)
-        if output_dir_config and not os.path.exists(output_dir_config):
-            os.makedirs(output_dir_config, exist_ok=True)
+        if model_type == 'vanilla_gan':
+            model_info_data.update({
+                'training_algorithm': model.config.training_algorithm.value,
+                'generator_type': type(model.generator).__name__,
+                'discriminator_type': type(model.discriminator).__name__,
+                'trainer_type': type(model.trainer).__name__,
+                'device': str(model.trainer.device),
+                'input_dim': model.config.input_dim,
+                'latent_dim': model.config.latent_dim
+            })
         
-        with open(args.init_config_path, 'w') as f:
-            json.dump(init_config, f, indent=2)
-        print(f'Init config saved to: {args.init_config_path}')
+        # Encode updated config to base64
+        updated_config_json = json.dumps(gan_config)
+        updated_config_base64 = base64.b64encode(updated_config_json.encode('utf-8')).decode('utf-8')
         
-        print(f'{model_type.upper()} Model Initialization Complete')
-        print(f'Model type: {model_type}')
-        print(f'Model class: {type(gan_model).__name__}')
-        print(f'Model created successfully')
+        # Save outputs
+        os.makedirs(os.path.dirname(args.model_out) or '.', exist_ok=True)
+        with open(args.model_out, 'wb') as f:
+            pickle.dump(model, f)
+        
+        os.makedirs(os.path.dirname(args.gan_config_base64_updated) or '.', exist_ok=True)
+        with open(args.gan_config_base64_updated, 'w') as f:
+            f.write(updated_config_base64)
+        
+        os.makedirs(os.path.dirname(args.model_info) or '.', exist_ok=True)
+        with open(args.model_info, 'w') as f:
+            json.dump(model_info_data, f, indent=2)
+        
+        print("="*60)
+        print("GAN Model Builder completed successfully")
+        print(f"Model saved: {args.model_out}")
+        print(f"Config (base64) saved: {args.gan_config_base64_updated}")
+        print(f"Model info saved: {args.model_info}")
+        print("="*60)
 
     args:
-      - --gan_config
-      - {inputValue: gan_config}
-      - --model_path
-      - {outputPath: model}
-      - --init_config_path
-      - {outputPath: init_config}
+      - --gan_config_base64
+      - {inputPath: gan_config_base64}
+      - --model_name
+      - {inputValue: model_name}
+      - --model_out
+      - {outputPath: model_out}
+      - --gan_config_base64_updated
+      - {outputPath: gan_config_base64_updated}
+      - --model_info
+      - {outputPath: model_info}
