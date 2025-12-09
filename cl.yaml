@@ -1,0 +1,743 @@
+name: Create Vanilla GAN Continual Learning Tasks
+description: Splits data into multiple tasks for Vanilla GAN continual learning with flattened data support and different training algorithms
+inputs:
+  - name: trained_model
+    type: Model
+    description: Trained Vanilla GAN model from Train brick
+  - name: preprocessed_data
+    type: Dataset
+    description: Preprocessed dataset from Preprocess brick (flattened)
+  - name: training_history
+    type: String
+    description: Training history from Train brick
+  - name: gan_config_json
+    type: String
+    description: Master GAN configuration as JSON string
+outputs:
+  - name: continual_tasks
+    type: Dataset
+  - name: continual_config
+    type: String
+    description: Configuration for continual learning tasks
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v35
+    command:
+      - sh
+      - -c
+      - |
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import sys
+        import json
+        import pickle
+        import base64
+        import numpy as np
+        import torch
+        from torch.utils.data import Dataset, Subset
+        from PIL import Image
+        import io
+        import random
+        import math
+        
+        # =============================================================================
+        # DEFINE VanillaGANDataset CLASS (SAME AS OTHER BRICKS)
+        # =============================================================================
+        
+        class VanillaGANDataset(Dataset):
+            def __init__(self, data_list, transform=None, target_size=28, channels=1):
+                self.data_list = data_list
+                self.transform = transform
+                self.target_size = target_size
+                self.channels = channels
+                self.input_dim = target_size * target_size * channels
+            
+            def __len__(self):
+                return len(self.data_list)
+            
+            def __getitem__(self, idx):
+                item = self.data_list[idx]
+                try:
+                    img_data = base64.b64decode(item['image_data'])
+                    img = Image.open(io.BytesIO(img_data))
+                    
+                    if self.channels == 1 and img.mode != 'L':
+                        img = img.convert('L')
+                    elif self.channels == 3 and img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    
+                    # Convert PIL to tensor and flatten for Vanilla GAN
+                    img_tensor = torch.tensor(np.array(img)).float() / 255.0 * 2 - 1  # Normalize to [-1, 1]
+                    flat_img = img_tensor.view(-1)
+                    
+                    return flat_img
+                except Exception as e:
+                    print("Error processing image {}: {}".format(idx, e))
+                    return torch.zeros(self.input_dim)
+        
+        # =============================================================================
+        # CONTINUAL LEARNING TASK CREATOR FOR VANILLA GAN
+        # =============================================================================
+        
+        class VanillaGANTaskSplitter:
+            
+            def __init__(self, data, config, gan_model, training_history):
+                self.data = data
+                self.config = config
+                self.gan_model = gan_model
+                self.training_history = training_history
+                self.model_type = config.get('model', {}).get('gan_type', 'vanilla_gan').lower()
+                self.training_algorithm = config.get('model', {}).get('training_algorithm', 'backprop')
+                
+                # Vanilla GAN specific parameters
+                model_config = config.get('model', {})
+                self.input_dim = model_config.get('input_dim', 784)
+                self.image_size = int(math.sqrt(self.input_dim)) if model_config.get('channels', 1) == 1 else 28
+                self.channels = model_config.get('channels', 1)
+                
+            def create_continual_tasks(self, num_tasks=3, strategy='temporal_split'):   
+                
+                if strategy == 'temporal_split':
+                    return self._temporal_split(num_tasks)
+                elif strategy == 'class_split':
+                    return self._class_split(num_tasks)
+                elif strategy == 'domain_split':
+                    return self._domain_split(num_tasks)
+                elif strategy == 'algorithm_aware_split':
+                    return self._algorithm_aware_split(num_tasks)
+                elif strategy == 'complexity_split':
+                    return self._complexity_split(num_tasks)
+                else:
+                    return self._temporal_split(num_tasks)
+            
+            def _temporal_split(self, num_tasks):
+                tasks = []
+                dataset = self.data['dataset'] if isinstance(self.data, dict) else self.data
+                total_samples = len(dataset)
+                
+                # Create temporal splits
+                split_indices = np.array_split(range(total_samples), num_tasks)
+                
+                for task_id, indices in enumerate(split_indices):
+                    # Create subset for this task
+                    task_dataset = Subset(dataset, indices.tolist())
+                    
+                    # Create task-specific configuration
+                    task_config = self._create_task_config(task_id, len(indices))
+                    
+                    task_data = {
+                        'task_id': task_id,
+                        'dataset': task_dataset,
+                        'indices': indices.tolist(),
+                        'num_samples': len(indices),
+                        'config': task_config,
+                        'description': 'Vanilla GAN Temporal Task {}/{}'.format(task_id+1, num_tasks),
+                        'model_type': self.model_type,
+                        'training_algorithm': self.training_algorithm,
+                        'data_format': 'flattened',
+                        'input_dim': self.input_dim,
+                        'image_size': self.image_size,
+                        'channels': self.channels,
+                        'requires_knowledge_replay': task_id > 0,
+                        'memory_size': min(100, len(indices) // 10),
+                        'vanilla_gan_specific': {
+                            'flattened_data': True,
+                            'requires_reshape': True,
+                            'normalization_range': '[-1, 1]'
+                        }
+                    }
+                    
+                    tasks.append(task_data)
+                
+                return tasks
+            
+            def _class_split(self, num_tasks):
+                tasks = []
+                dataset = self.data['dataset'] if isinstance(self.data, dict) else self.data
+                
+                try:
+                    # Extract labels from dataset
+                    labels = []
+                    for i in range(min(1000, len(dataset))):
+                        item = dataset[i]
+                        if isinstance(item, tuple) and len(item) == 2:
+                            _, label = item
+                            labels.append(label)
+                        else:
+                            # Try to extract label from data structure
+                            if hasattr(item, 'get'):
+                                label = item.get('label', i % num_tasks)
+                            else:
+                                label = i % num_tasks
+                            labels.append(label)
+                    
+                    unique_labels = list(set(labels))
+                    print("Found {} unique labels for Vanilla GAN class split".format(len(unique_labels)))
+                    
+                    if len(unique_labels) >= num_tasks:
+                        # Split by label
+                        label_groups = {}
+                        for label in unique_labels:
+                            label_groups[label] = []
+                        
+                        # Group samples by label
+                        for i in range(min(len(dataset), 2000)):
+                            item = dataset[i]
+                            if isinstance(item, tuple) and len(item) == 2:
+                                _, label = item
+                            else:
+                                if hasattr(item, 'get'):
+                                    label = item.get('label', labels[i] if i < len(labels) else 0)
+                                else:
+                                    label = labels[i] if i < len(labels) else 0
+                            
+                            label_groups[label].append(i)
+                        
+                        # Distribute labels to tasks
+                        task_id = 0
+                        
+                        for label, indices in label_groups.items():
+                            if indices and task_id < num_tasks:
+                                task_dataset = Subset(dataset, indices)
+                                task_config = self._create_task_config(task_id, len(indices))
+                                
+                                task_data = {
+                                    'task_id': task_id,
+                                    'dataset': task_dataset,
+                                    'indices': indices,
+                                    'num_samples': len(indices),
+                                    'config': task_config,
+                                    'description': 'Vanilla GAN Class Task {} (Label: {})'.format(task_id+1, label),
+                                    'model_type': self.model_type,
+                                    'training_algorithm': self.training_algorithm,
+                                    'data_format': 'flattened',
+                                    'input_dim': self.input_dim,
+                                    'image_size': self.image_size,
+                                    'channels': self.channels,
+                                    'label': label,
+                                    'requires_knowledge_replay': task_id > 0,
+                                    'memory_size': min(100, len(indices) // 10),
+                                    'vanilla_gan_specific': {
+                                        'flattened_data': True,
+                                        'requires_reshape': True,
+                                        'normalization_range': '[-1, 1]',
+                                        'class_conditional': True
+                                    }
+                                }
+                                
+                                tasks.append(task_data)
+                                task_id += 1
+                        
+                        # Fill remaining tasks if needed
+                        if len(tasks) < num_tasks:
+                            remaining_indices = list(set(range(len(dataset))) - 
+                                                   set(idx for task in tasks for idx in task['indices']))
+                            for i in range(num_tasks - len(tasks)):
+                                task_id = len(tasks)
+                                split_size = len(remaining_indices) // (num_tasks - task_id)
+                                task_indices = remaining_indices[:split_size]
+                                remaining_indices = remaining_indices[split_size:]
+                                
+                                task_dataset = Subset(dataset, task_indices)
+                                task_config = self._create_task_config(task_id, len(task_indices))
+                                
+                                task_data = {
+                                    'task_id': task_id,
+                                    'dataset': task_dataset,
+                                    'indices': task_indices,
+                                    'num_samples': len(task_indices),
+                                    'config': task_config,
+                                    'description': 'Vanilla GAN Task {} (Remaining Data)'.format(task_id+1),
+                                    'model_type': self.model_type,
+                                    'training_algorithm': self.training_algorithm,
+                                    'data_format': 'flattened',
+                                    'input_dim': self.input_dim,
+                                    'image_size': self.image_size,
+                                    'channels': self.channels,
+                                    'requires_knowledge_replay': task_id > 0,
+                                    'memory_size': min(100, len(task_indices) // 10),
+                                    'vanilla_gan_specific': {
+                                        'flattened_data': True,
+                                        'requires_reshape': True,
+                                        'normalization_range': '[-1, 1]'
+                                    }
+                                }
+                                tasks.append(task_data)
+                    
+                    else:
+                        # Not enough unique labels, use temporal split
+                        print("Not enough unique labels for class split, using temporal")
+                        tasks = self._temporal_split(num_tasks)
+                        
+                except Exception as e:
+                    print("Class split failed: {}".format(e))
+                    import traceback
+                    traceback.print_exc()
+                    tasks = self._temporal_split(num_tasks)
+                
+                return tasks
+            
+            def _domain_split(self, num_tasks):
+                tasks = []
+                dataset = self.data['dataset'] if isinstance(self.data, dict) else self.data
+                total_samples = len(dataset)
+                
+                # Simulate domains by splitting data into chunks
+                split_indices = np.array_split(range(total_samples), num_tasks)
+                
+                for task_id, indices in enumerate(split_indices):
+                    # Create subset
+                    task_dataset = Subset(dataset, indices.tolist())
+                    
+                    # Create domain-specific configuration
+                    task_config = self._create_task_config(task_id, len(indices))
+                    
+                    # Simulate domain shift parameters for Vanilla GAN
+                    domain_shift = {
+                        'brightness': random.uniform(0.8, 1.2),
+                        'contrast': random.uniform(0.8, 1.2),
+                        'noise_level': random.uniform(0.0, 0.1),
+                        'blur_level': random.uniform(0.0, 0.5),
+                        'domain_id': task_id,
+                        'pixel_intensity_shift': random.uniform(-0.2, 0.2),
+                        'flatten_distortion': random.uniform(0.95, 1.05)
+                    }
+                    task_config['domain_shift'] = domain_shift
+                    
+                    task_data = {
+                        'task_id': task_id,
+                        'dataset': task_dataset,
+                        'indices': indices.tolist(),
+                        'num_samples': len(indices),
+                        'config': task_config,
+                        'description': 'Vanilla GAN Domain Task {}/{}'.format(task_id+1, num_tasks),
+                        'model_type': self.model_type,
+                        'training_algorithm': self.training_algorithm,
+                        'data_format': 'flattened',
+                        'input_dim': self.input_dim,
+                        'image_size': self.image_size,
+                        'channels': self.channels,
+                        'domain_shift': domain_shift,
+                        'requires_knowledge_replay': task_id > 0,
+                        'memory_size': min(100, len(indices) // 10),
+                        'vanilla_gan_specific': {
+                            'flattened_data': True,
+                            'requires_reshape': True,
+                            'normalization_range': '[-1, 1]',
+                            'domain_adaptive': True
+                        }
+                    }
+                    
+                    tasks.append(task_data)
+                
+                return tasks
+            
+            def _complexity_split(self, num_tasks):
+                """Vanilla GAN specific: Split by image complexity/difficulty"""
+                tasks = []
+                dataset = self.data['dataset'] if isinstance(self.data, dict) else self.data
+                total_samples = len(dataset)
+                
+                # Calculate complexity scores for samples
+                try:
+                    complexity_scores = []
+                    for i in range(min(1000, total_samples)):
+                        try:
+                            sample = dataset[i]
+                            if hasattr(sample, 'numpy'):
+                                img_data = sample.numpy()
+                            else:
+                                # Try to convert to tensor first
+                                img_tensor = torch.tensor(sample).float()
+                                img_data = img_tensor.numpy()
+                            
+                            # Calculate complexity as variance in pixel values
+                            complexity = np.var(img_data.flatten())
+                            complexity_scores.append((i, complexity))
+                        except:
+                            complexity_scores.append((i, 0.5))  # Default complexity
+                    
+                    # Sort by complexity
+                    complexity_scores.sort(key=lambda x: x[1])
+                    
+                    # Split into tasks by complexity
+                    split_indices = np.array_split([idx for idx, _ in complexity_scores], num_tasks)
+                    
+                    for task_id, indices in enumerate(split_indices):
+                        task_dataset = Subset(dataset, indices.tolist())
+                        task_config = self._create_task_config(task_id, len(indices))
+                        
+                        # Add complexity-specific parameters
+                        complexity_level = "Low" if task_id == 0 else "Medium" if task_id < num_tasks-1 else "High"
+                        task_config['complexity_params'] = {
+                            'level': complexity_level,
+                            'adaptive_lr': 0.0002 / (1 + task_id * 0.5),  # Lower LR for complex data
+                            'generator_layers': [256, 512, 1024] if task_id < 2 else [512, 1024, 2048],
+                            'discriminator_layers': [1024, 512, 256] if task_id < 2 else [2048, 1024, 512]
+                        }
+                        
+                        task_data = {
+                            'task_id': task_id,
+                            'dataset': task_dataset,
+                            'indices': indices.tolist(),
+                            'num_samples': len(indices),
+                            'config': task_config,
+                            'description': 'Vanilla GAN Complexity Task {} ({})'.format(task_id+1, complexity_level),
+                            'model_type': self.model_type,
+                            'training_algorithm': self.training_algorithm,
+                            'data_format': 'flattened',
+                            'input_dim': self.input_dim,
+                            'image_size': self.image_size,
+                            'channels': self.channels,
+                            'complexity_level': complexity_level,
+                            'requires_knowledge_replay': task_id > 0,
+                            'memory_size': min(150, len(indices) // 8),  # More memory for complex tasks
+                            'vanilla_gan_specific': {
+                                'flattened_data': True,
+                                'requires_reshape': True,
+                                'normalization_range': '[-1, 1]',
+                                'complexity_adaptive': True,
+                                'architecture_scaling': True
+                            }
+                        }
+                        
+                        tasks.append(task_data)
+                        
+                except Exception as e:
+                    print("Complexity split failed: {}, using temporal split".format(e))
+                    tasks = self._temporal_split(num_tasks)
+                
+                return tasks
+            
+            def _algorithm_aware_split(self, num_tasks):
+                tasks = []
+                dataset = self.data['dataset'] if isinstance(self.data, dict) else self.data
+                total_samples = len(dataset)
+                
+                # Algorithm-specific splitting for Vanilla GAN
+                if self.training_algorithm == 'forward_forward':
+                    # For Forward-Forward, split by difficulty/complexity
+                    split_indices = np.array_split(range(total_samples), num_tasks)
+                    
+                    for task_id, indices in enumerate(split_indices):
+                        task_dataset = Subset(dataset, indices.tolist())
+                        task_config = self._create_task_config(task_id, len(indices))
+                        
+                        # Forward-Forward specific parameters for Vanilla GAN
+                        task_config['ff_params'] = {
+                            'theta': 2.0 - (task_id * 0.2),  # Decrease threshold for later tasks
+                            'positive_margin': 2.0 - (task_id * 0.1),
+                            'negative_margin': 0.0 + (task_id * 0.1),
+                            'block_freeze_ratio': min(0.8, 0.3 + (task_id * 0.1)),
+                            'flatten_layer_specific': True,
+                            'linear_layer_goodness': True
+                        }
+                        
+                        task_data = {
+                            'task_id': task_id,
+                            'dataset': task_dataset,
+                            'indices': indices.tolist(),
+                            'num_samples': len(indices),
+                            'config': task_config,
+                            'description': 'Vanilla GAN FF Task {}/{}'.format(task_id+1, num_tasks),
+                            'model_type': self.model_type,
+                            'training_algorithm': 'forward_forward',
+                            'data_format': 'flattened',
+                            'input_dim': self.input_dim,
+                            'image_size': self.image_size,
+                            'channels': self.channels,
+                            'requires_knowledge_replay': True,
+                            'memory_size': min(150, len(indices) // 5),  # More memory for FF
+                            'vanilla_gan_specific': {
+                                'flattened_data': True,
+                                'requires_reshape': True,
+                                'normalization_range': '[-1, 1]',
+                                'ff_compatible': True,
+                                'linear_goodness_computation': True
+                            }
+                        }
+                        tasks.append(task_data)
+                
+                elif self.training_algorithm == 'cafo':
+                    # For CAFO, split for sequential block training
+                    split_indices = np.array_split(range(total_samples), num_tasks)
+                    
+                    for task_id, indices in enumerate(split_indices):
+                        task_dataset = Subset(dataset, indices.tolist())
+                        task_config = self._create_task_config(task_id, len(indices))
+                        
+                        # CAFO specific parameters for Vanilla GAN
+                        task_config['cafo_params'] = {
+                            'block_lr': 0.001 * (0.9 ** task_id),  # Decay learning rate
+                            'freeze_previous': True,
+                            'warmup_epochs': max(1, 5 - task_id),
+                            'block_progressive': True,
+                            'linear_block_training': True,
+                            'flatten_aware_blocks': True
+                        }
+                        
+                        task_data = {
+                            'task_id': task_id,
+                            'dataset': task_dataset,
+                            'indices': indices.tolist(),
+                            'num_samples': len(indices),
+                            'config': task_config,
+                            'description': 'Vanilla GAN CAFO Task {}/{}'.format(task_id+1, num_tasks),
+                            'model_type': self.model_type,
+                            'training_algorithm': 'cafo',
+                            'data_format': 'flattened',
+                            'input_dim': self.input_dim,
+                            'image_size': self.image_size,
+                            'channels': self.channels,
+                            'requires_knowledge_replay': task_id > 0,
+                            'memory_size': min(100, len(indices) // 10),
+                            'vanilla_gan_specific': {
+                                'flattened_data': True,
+                                'requires_reshape': True,
+                                'normalization_range': '[-1, 1]',
+                                'cafo_compatible': True,
+                                'block_wise_training': True
+                            }
+                        }
+                        tasks.append(task_data)
+                
+                else:
+                    # For Backprop, use standard temporal split with vanilla GAN optimizations
+                    tasks = self._temporal_split(num_tasks)
+                    
+                    # Add backprop-specific optimizations
+                    for task in tasks:
+                        task['vanilla_gan_specific']['backprop_optimized'] = True
+                        task['vanilla_gan_specific']['gradient_clipping'] = True
+                        task['vanilla_gan_specific']['adaptive_discriminator_training'] = True
+                
+                return tasks
+            
+            def _create_task_config(self, task_id, num_samples):
+                base_config = self.config.copy()
+                
+                # Modify configuration for this task
+                model_config = base_config.get('model', {})
+                training_config = base_config.get('training', {})
+                
+                # Adjust parameters based on task
+                base_lr = model_config.get('learning_rate', 0.0002)
+                task_lr = base_lr * (0.9 ** task_id)  # Decay learning rate for later tasks
+                
+                base_epochs = training_config.get('epochs', 10)
+                task_epochs = max(3, base_epochs // (task_id + 1))
+                
+                # Task-specific parameters for Vanilla GAN
+                task_config = {
+                    'task_id': task_id,
+                    'num_samples': num_samples,
+                    'learning_rate': task_lr,
+                    'epochs': task_epochs,
+                    'requires_knowledge_replay': task_id > 0,
+                    'requires_regularization': task_id > 0,
+                    'memory_size': min(100, num_samples // 10),
+                    'elastic_weight_consolidation': task_id > 0,
+                    'gradient_episode_memory': True,
+                    'vanilla_gan_params': {
+                        'input_dim': self.input_dim,
+                        'image_size': self.image_size,
+                        'channels': self.channels,
+                        'flattened_input': True,
+                        'generator_layers': model_config.get('generator_layers', [256, 512, 1024]),
+                        'discriminator_layers': model_config.get('discriminator_layers', [1024, 512, 256]),
+                        'adaptive_architecture': task_id > 1,
+                        'layer_scaling_factor': 1.0 + (task_id * 0.2) if task_id > 0 else 1.0
+                    },
+                    'base_model_performance': {
+                        'final_g_loss': self.training_history.get('losses_g', [1.0])[-1] if self.training_history.get('losses_g') else 1.0,
+                        'final_d_loss': self.training_history.get('losses_d', [1.0])[-1] if self.training_history.get('losses_d') else 1.0,
+                        'algorithm': self.training_algorithm,
+                        'architecture': 'fully_connected'
+                    }
+                }
+                
+                return task_config
+        
+        def main():
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--trained_model', type=str, required=True)
+            parser.add_argument('--preprocessed_data', type=str, required=True)
+            parser.add_argument('--training_history', type=str, required=True)
+            parser.add_argument('--gan_config_json', type=str, required=True)
+            parser.add_argument('--continual_tasks', type=str, required=True)
+            parser.add_argument('--continual_config', type=str, required=True)
+            args = parser.parse_args()
+            
+            print("VANILLA GAN CONTINUAL LEARNING TASK CREATION")
+            print("="*60)
+            
+            # Parse configuration
+            gan_config = json.loads(args.gan_config_json)
+            
+            # Load trained model
+            try:
+                with open(args.trained_model, 'rb') as f:
+                    gan_model = pickle.load(f)
+                print("Trained Vanilla GAN model loaded: {}".format(type(gan_model).__name__))
+            except Exception as e:
+                print("Error loading trained model: {}".format(e))
+                gan_model = None
+            
+            # Load preprocessed data
+            with open(args.preprocessed_data, 'rb') as f:
+                data_wrapper = pickle.load(f)
+            
+            print("Preprocessed data loaded: {}".format(type(data_wrapper)))
+            
+            # Load training history
+            with open(args.training_history, 'r') as f:
+                training_history = json.load(f)
+            
+            # Get continual learning parameters
+            cl_config = gan_config.get('continual_learning', {})
+            model_config = gan_config.get('model', {})
+            
+            gan_type = model_config.get('gan_type', 'vanilla_gan')
+            algorithm = model_config.get('training_algorithm', 'backprop')
+            input_dim = model_config.get('input_dim', 784)
+            image_size = int(math.sqrt(input_dim)) if model_config.get('channels', 1) == 1 else 28
+            
+            print("Creating continual tasks for {} trained with {}".format(gan_type.upper(), algorithm.upper()))
+            print("Input dimension: {} ({}x{} flattened)".format(input_dim, image_size, image_size))
+            
+            # Get strategy and parameters
+            strategy = cl_config.get('strategy', 'temporal_split')
+            num_tasks = cl_config.get('num_tasks', 3)
+            memory_size = cl_config.get('memory_size', 100)
+            
+            print("Strategy: {}, Tasks: {}, Memory: {}".format(strategy, num_tasks, memory_size))
+            
+            # Create task splitter
+            splitter = VanillaGANTaskSplitter(data_wrapper, gan_config, gan_model, training_history)
+            
+            # Create tasks
+            tasks = splitter.create_continual_tasks(num_tasks=num_tasks, strategy=strategy)
+            
+            print("\\nCreated {} Vanilla GAN continual learning tasks:".format(len(tasks)))
+            for task in tasks:
+                print("  Task {}: {} - {} samples".format(task['task_id']+1, task['description'], task['num_samples']))
+                print("    Data format: {}, Input dim: {}".format(task['data_format'], task['input_dim']))
+                if 'label' in task:
+                    print("    Label: {}".format(task['label']))
+                if 'domain_shift' in task:
+                    print("    Domain ID: {}".format(task['domain_shift']['domain_id']))
+                if 'complexity_level' in task:
+                    print("    Complexity: {}".format(task['complexity_level']))
+            
+            # Create continual learning configuration
+            continual_config = {
+                'gan_type': gan_type,
+                'architecture': 'fully_connected',
+                'training_algorithm': algorithm,
+                'strategy': strategy,
+                'num_tasks': len(tasks),
+                'total_samples': sum(task['num_samples'] for task in tasks),
+                'memory_size': memory_size,
+                'input_format': 'flattened',
+                'input_dim': input_dim,
+                'image_size': image_size,
+                'channels': model_config.get('channels', 1),
+                'tasks': [
+                    {
+                        'task_id': task['task_id'],
+                        'description': task['description'],
+                        'num_samples': task['num_samples'],
+                        'split_type': task.get('split_type', strategy),
+                        'requires_replay': task.get('requires_knowledge_replay', False),
+                        'memory_size': task.get('memory_size', memory_size),
+                        'model_type': task['model_type'],
+                        'algorithm': task['training_algorithm'],
+                        'data_format': task['data_format'],
+                        'input_dim': task['input_dim'],
+                        'vanilla_gan_specific': task.get('vanilla_gan_specific', {})
+                    }
+                    for task in tasks
+                ],
+                'base_model_info': {
+                    'final_g_loss': training_history.get('losses_g', [1.0])[-1] if training_history.get('losses_g') else 1.0,
+                    'final_d_loss': training_history.get('losses_d', [1.0])[-1] if training_history.get('losses_d') else 1.0,
+                    'epochs_trained': training_history.get('epochs_completed', 0),
+                    'algorithm': algorithm,
+                    'architecture': 'fully_connected',
+                    'input_dim': input_dim
+                },
+                'training_recommendations': {
+                    'learning_rate_decay': 0.9,
+                    'epochs_per_task': max(5, gan_config.get('training', {}).get('epochs', 10) // 2),
+                    'use_elastic_weight_consolidation': True,
+                    'use_gradient_episode_memory': True,
+                    'vanilla_gan_specific': {
+                        'flatten_data_before_training': True,
+                        'reshape_generated_samples': True,
+                        'linear_layer_regularization': True,
+                        'generator_discriminator_balance': True,
+                        'architecture_adaptation': True
+                    },
+                    'algorithm_specific': {
+                        'forward_forward': {
+                            'decrease_theta_per_task': 0.2,
+                            'increase_memory_for_later_tasks': True,
+                            'linear_layer_goodness_computation': True,
+                            'flattened_input_compatible': True
+                        },
+                        'cafo': {
+                            'freeze_previous_blocks': True,
+                            'progressive_block_training': True,
+                            'linear_block_optimization': True,
+                            'flatten_aware_gradients': True
+                        },
+                        'backprop': {
+                            'standard_continual_learning': True,
+                            'experience_replay': True,
+                            'gradient_clipping_for_linear_layers': True,
+                            'adaptive_discriminator_training': True
+                        }
+                    }
+                }
+            }
+            
+            # Save outputs
+            os.makedirs(os.path.dirname(args.continual_tasks), exist_ok=True)
+            with open(args.continual_tasks, 'wb') as f:
+                pickle.dump(tasks, f)
+            
+            os.makedirs(os.path.dirname(args.continual_config), exist_ok=True)
+            with open(args.continual_config, 'w') as f:
+                json.dump(continual_config, f, indent=2)
+            
+            print("\\nVanilla GAN Continual Learning Configuration Created:")
+            print("  Strategy: {}".format(strategy))
+            print("  Architecture: Fully Connected (Linear Layers)")
+            print("  Data Format: Flattened {}-dimensional vectors".format(input_dim))
+            print("  Memory per task: {} samples".format(memory_size))
+            print("  Algorithm-aware splits: {}".format(strategy == 'algorithm_aware_split'))
+            print("  Supports: Temporal, Class, Domain, Complexity, Algorithm-Aware splits")
+            print("="*60)
+        
+        if __name__ == '__main__':
+            main()
+
+    args:
+      - --trained_model
+      - {inputPath: trained_model}
+      - --preprocessed_data
+      - {inputPath: preprocessed_data}
+      - --training_history
+      - {inputPath: training_history}
+      - --gan_config_json
+      - {inputValue: gan_config_json}
+      - --continual_tasks
+      - {outputPath: continual_tasks}
+      - --continual_config
+      - {outputPath: continual_config}
