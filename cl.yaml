@@ -339,7 +339,6 @@ implementation:
                 return tasks
             
             def _complexity_split(self, num_tasks):
-                """Vanilla GAN specific: Split by image complexity/difficulty"""
                 tasks = []
                 dataset = self.data['dataset'] if isinstance(self.data, dict) else self.data
                 total_samples = len(dataset)
