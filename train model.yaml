@@ -116,13 +116,14 @@ implementation:
         model_config = gan_config.get('model', {})
         training_config = gan_config.get('training', {})
         
-        # BALANCED TRAINING PARAMETERS
+        # BALANCED TRAINING PARAMETERS - STRONGER REGULARIZATION
         generator_lr = model_config.get('generator_lr', model_config.get('learning_rate', 0.0002))
-        discriminator_lr = model_config.get('discriminator_lr', model_config.get('learning_rate', 0.0001))
+        discriminator_lr = model_config.get('discriminator_lr', model_config.get('learning_rate', 0.00005))  # Much lower D LR
         d_train_steps = training_config.get('d_train_steps', 1)
-        g_train_steps = training_config.get('g_train_steps', 1)
-        label_smoothing = training_config.get('label_smoothing', 0.0)
-        noise_std = training_config.get('noise_std', 0.0)
+        g_train_steps = training_config.get('g_train_steps', 3)  # Train G more
+        label_smoothing = training_config.get('label_smoothing', 0.2)  # Stronger smoothing
+        noise_std = training_config.get('noise_std', 0.1)  # More noise
+        d_dropout = training_config.get('d_dropout', 0.5)  # Discriminator dropout
         
         print(f"BALANCED TRAINING CONFIG:")
         print(f"  Generator LR: {generator_lr}")
@@ -131,6 +132,7 @@ implementation:
         print(f"  G Train Steps: {g_train_steps}")
         print(f"  Label Smoothing: {label_smoothing}")
         print(f"  Noise Std: {noise_std}")
+        print(f"  D Dropout: {d_dropout}")
         
         # Vanilla GAN specific settings
         algorithm = model_config.get('training_algorithm', 'backprop')
@@ -196,7 +198,7 @@ implementation:
                 return self.model(z)
         
         class VanillaDiscriminator(nn.Module):
-            def __init__(self, input_dim, hidden_layers=[1024, 512, 256]):
+            def __init__(self, input_dim, hidden_layers=[1024, 512, 256], dropout_rate=0.5):
                 super(VanillaDiscriminator, self).__init__()
                 self.input_dim = input_dim
                 
@@ -206,7 +208,7 @@ implementation:
                 for hidden_dim in hidden_layers:
                     layers.append(nn.Linear(current_dim, hidden_dim))
                     layers.append(nn.LeakyReLU(0.2))
-                    layers.append(nn.Dropout(0.3))
+                    layers.append(nn.Dropout(dropout_rate))  # Use configurable dropout
                     current_dim = hidden_dim
                 
                 layers.append(nn.Linear(current_dim, 1))
@@ -290,7 +292,8 @@ implementation:
                 )
                 discriminator = VanillaDiscriminator(
                     config.get('input_dim', 784),
-                    config.get('discriminator_layers', [1024, 512, 256])
+                    config.get('discriminator_layers', [1024, 512, 256]),
+                    config.get('d_dropout', 0.5)
                 )
                 
                 # Load state dicts
@@ -337,7 +340,8 @@ implementation:
                 )
                 discriminator = VanillaDiscriminator(
                     fallback_config['input_dim'],
-                    fallback_config['discriminator_layers']
+                    fallback_config['discriminator_layers'],
+                    d_dropout
                 )
                 
                 gan = BalancedVanillaGAN(generator, discriminator, fallback_config)
@@ -409,8 +413,18 @@ implementation:
                 
                 # =============
                 # Train Discriminator (d_train_steps times)
+                # EARLY STOPPING if discriminator gets too good
                 # =============
-                for d_step in range(d_train_steps):
+                # Skip discriminator training if it's too strong
+                d_steps_to_run = d_train_steps
+                if len(epoch_real_scores) > 0:
+                    recent_real_score = np.mean(epoch_real_scores[-10:])  # Last 10 batches
+                    recent_fake_score = np.mean(epoch_fake_scores[-10:])
+                    if recent_real_score > 0.85 and recent_fake_score < 0.15:
+                        d_steps_to_run = 0  # Skip discriminator training
+                        print(f"Skipping D training - too strong (Real: {recent_real_score:.3f}, Fake: {recent_fake_score:.3f})")
+                
+                for d_step in range(d_steps_to_run):
                     gan.d_optimizer.zero_grad()
                     
                     # Real data
@@ -438,8 +452,18 @@ implementation:
                 
                 # =============
                 # Train Generator (g_train_steps times)
+                # BOOST generator training if discriminator is too strong
                 # =============
-                for g_step in range(g_train_steps):
+                # Increase generator training if discriminator is dominating
+                g_steps_to_run = g_train_steps
+                if len(epoch_real_scores) > 0:
+                    recent_real_score = np.mean(epoch_real_scores[-10:])
+                    recent_fake_score = np.mean(epoch_fake_scores[-10:])
+                    if recent_real_score > 0.85 and recent_fake_score < 0.15:
+                        g_steps_to_run = g_train_steps * 3  # Triple generator training
+                        print(f"Boosting G training - D too strong (Real: {recent_real_score:.3f}, Fake: {recent_fake_score:.3f})")
+                
+                for g_step in range(g_steps_to_run):
                     gan.g_optimizer.zero_grad()
                     
                     # Generate fake data (don't detach this time)
@@ -568,7 +592,10 @@ implementation:
                 'd_train_steps': d_train_steps,
                 'g_train_steps': g_train_steps,
                 'label_smoothing': label_smoothing,
-                'noise_std': noise_std
+                'noise_std': noise_std,
+                'd_dropout': d_dropout,
+                'adaptive_training': True,
+                'early_stopping': True
             },
             'convergence_info': {
                 'generator_converged': training_history['losses_g'][-1] < 2.0 if training_history['losses_g'] else False,
