@@ -1,5 +1,5 @@
-name: Train Vanilla GAN
-description: Trains Vanilla GAN model using master config with fully connected architecture training
+name: Train Vanilla GAN (Balanced)
+description: Trains Vanilla GAN model with balanced training to prevent discriminator dominance
 inputs:
   - name: initialized_model
     type: Model
@@ -108,13 +108,29 @@ implementation:
         parser.add_argument('--generated_samples', type=str, required=True)
         args = parser.parse_args()
         
-        print("VANILLA GAN TRAINING STARTING")
+        print("VANILLA GAN BALANCED TRAINING STARTING")
         print("="*60)
         
         # Parse configuration
         gan_config = json.loads(args.gan_config_json)
         model_config = gan_config.get('model', {})
         training_config = gan_config.get('training', {})
+        
+        # BALANCED TRAINING PARAMETERS
+        generator_lr = model_config.get('generator_lr', model_config.get('learning_rate', 0.0002))
+        discriminator_lr = model_config.get('discriminator_lr', model_config.get('learning_rate', 0.0001))
+        d_train_steps = training_config.get('d_train_steps', 1)
+        g_train_steps = training_config.get('g_train_steps', 1)
+        label_smoothing = training_config.get('label_smoothing', 0.0)
+        noise_std = training_config.get('noise_std', 0.0)
+        
+        print(f"BALANCED TRAINING CONFIG:")
+        print(f"  Generator LR: {generator_lr}")
+        print(f"  Discriminator LR: {discriminator_lr}")
+        print(f"  D Train Steps: {d_train_steps}")
+        print(f"  G Train Steps: {g_train_steps}")
+        print(f"  Label Smoothing: {label_smoothing}")
+        print(f"  Noise Std: {noise_std}")
         
         # Vanilla GAN specific settings
         algorithm = model_config.get('training_algorithm', 'backprop')
@@ -201,18 +217,22 @@ implementation:
             def forward(self, x):
                 return self.model(x)
         
-        class SimpleVanillaGAN:
+        class BalancedVanillaGAN:
             def __init__(self, generator, discriminator, config):
                 self.generator = generator
                 self.discriminator = discriminator
                 self.config = config
                 self.device = torch.device(config.get('device', 'cpu'))
                 
-                # Create optimizers
-                lr = config.get('lr', 0.0002)
-                self.g_optimizer = torch.optim.Adam(generator.parameters(), lr=lr, betas=(0.5, 0.999))
-                self.d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=lr, betas=(0.5, 0.999))
+                # SEPARATE OPTIMIZERS WITH DIFFERENT LEARNING RATES
+                g_lr = config.get('generator_lr', 0.0002)
+                d_lr = config.get('discriminator_lr', 0.0001)
+                
+                self.g_optimizer = torch.optim.Adam(generator.parameters(), lr=g_lr, betas=(0.5, 0.999))
+                self.d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=d_lr, betas=(0.5, 0.999))
                 self.criterion = nn.BCELoss()
+                
+                print(f"Optimizers created: G_LR={g_lr}, D_LR={d_lr}")
         
         # Load model with robust error handling
         gan = None
@@ -225,14 +245,24 @@ implementation:
             
             # Handle different model formats from build step
             if hasattr(model_data, 'generator') and hasattr(model_data, 'discriminator'):
-                # Direct model object
-                gan = model_data
-                print("Loaded direct VanillaGAN model")
+                # Create new balanced GAN with separate learning rates
+                print("Converting to balanced GAN...")
+                config = {
+                    'generator_lr': generator_lr,
+                    'discriminator_lr': discriminator_lr,
+                    'device': 'cpu'
+                }
+                gan = BalancedVanillaGAN(model_data.generator, model_data.discriminator, config)
+                print("Loaded and converted to balanced GAN")
             
             elif hasattr(model_data, 'generator_state') and hasattr(model_data, 'discriminator_state'):
                 # Model wrapper with state dicts
-                print("Loaded VanillaGAN wrapper, reconstructing model...")
+                print("Loaded VanillaGAN wrapper, reconstructing balanced model...")
                 config = model_data.config
+                config.update({
+                    'generator_lr': generator_lr,
+                    'discriminator_lr': discriminator_lr
+                })
                 
                 generator = VanillaGenerator(
                     config.get('latent_dim', 100),
@@ -248,61 +278,25 @@ implementation:
                 generator.load_state_dict(model_data.generator_state)
                 discriminator.load_state_dict(model_data.discriminator_state)
                 
-                gan = SimpleVanillaGAN(generator, discriminator, config)
-                print("Successfully reconstructed model from wrapper")
-            
-            elif hasattr(model_data, 'generator_arch') and hasattr(model_data, 'discriminator_arch'):
-                # Alternative wrapper format with architecture
-                print("Found architecture-based wrapper, extracting models...")
-                gan = SimpleVanillaGAN(
-                    model_data.generator_arch, 
-                    model_data.discriminator_arch, 
-                    model_data.config
-                )
-                print("Successfully extracted model from architecture wrapper")
-            
-            elif isinstance(model_data, dict) and 'generator_state_dict' in model_data:
-                # State dict format
-                print("Found state dict format, reconstructing model...")
-                config = model_data.get('config', {})
-                
-                generator = VanillaGenerator(
-                    config.get('latent_dim', 100),
-                    config.get('input_dim', 784),
-                    config.get('generator_layers', [256, 512, 1024])
-                )
-                discriminator = VanillaDiscriminator(
-                    config.get('input_dim', 784),
-                    config.get('discriminator_layers', [1024, 512, 256])
-                )
-                
-                # Load state dicts
-                generator.load_state_dict(model_data['generator_state_dict'])
-                discriminator.load_state_dict(model_data['discriminator_state_dict'])
-                
-                gan = SimpleVanillaGAN(generator, discriminator, config)
-                print("Successfully reconstructed model from state dict")
+                gan = BalancedVanillaGAN(generator, discriminator, config)
+                print("Successfully reconstructed balanced model from wrapper")
             
             else:
-                print(f"Unknown model format. Available attributes: {dir(model_data)}")
-                if hasattr(model_data, '__dict__'):
-                    print(f"Model data dict: {model_data.__dict__.keys()}")
-                raise ValueError(f"Cannot handle model format: {type(model_data)}")
+                print(f"Creating new balanced model...")
+                raise ValueError("Creating fallback")
                 
         except Exception as e:
-            print(f"Error loading model: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Error loading model, creating balanced fallback: {e}")
             
-            # Create a fallback model if loading fails
-            print("Creating fallback model with default parameters...")
+            # Create a balanced fallback model
             try:
                 fallback_config = {
                     'latent_dim': model_config.get('latent_dim', 100),
                     'input_dim': input_dim,
                     'generator_layers': model_config.get('generator_layers', [256, 512, 1024]),
                     'discriminator_layers': model_config.get('discriminator_layers', [1024, 512, 256]),
-                    'lr': model_config.get('learning_rate', 0.0002),
+                    'generator_lr': generator_lr,
+                    'discriminator_lr': discriminator_lr,
                     'device': 'cpu'
                 }
                 
@@ -316,15 +310,15 @@ implementation:
                     fallback_config['discriminator_layers']
                 )
                 
-                gan = SimpleVanillaGAN(generator, discriminator, fallback_config)
-                print("Created fallback model successfully")
+                gan = BalancedVanillaGAN(generator, discriminator, fallback_config)
+                print("Created balanced fallback model successfully")
                 
             except Exception as fallback_error:
-                print(f"Failed to create fallback model: {fallback_error}")
+                print(f"Failed to create balanced fallback model: {fallback_error}")
                 raise
         
         if gan is None:
-            raise ValueError("Failed to load or create model")
+            raise ValueError("Failed to load or create balanced model")
         
         # Setup device and move model
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -335,10 +329,10 @@ implementation:
         gan.discriminator.to(device)
         
         # Get training parameters
-        epochs = training_config.get('epochs', 200)
+        epochs = training_config.get('epochs', 20)
         latent_dim = model_config.get('latent_dim', 100)
         
-        print(f"\\nStarting Vanilla GAN training...")
+        print(f"\\nStarting BALANCED Vanilla GAN training...")
         print(f"Epochs: {epochs}")
         print(f"Batch size: {batch_size}")
         print(f"Latent dim: {latent_dim}")
@@ -352,10 +346,11 @@ implementation:
             'real_scores': [],
             'fake_scores': [],
             'algorithm': algorithm,
+            'training_type': 'balanced',
             'timestamps': []
         }
         
-        # VANILLA GAN TRAINING LOOP
+        # BALANCED VANILLA GAN TRAINING LOOP
         for epoch in range(epochs):
             epoch_start = time.time()
             epoch_g_losses = []
@@ -367,44 +362,71 @@ implementation:
                 current_batch_size = real_data.size(0)
                 real_data = real_data.to(device)
                 
-                # Labels for real and fake
-                real_labels = torch.ones(current_batch_size, 1, device=device)
-                fake_labels = torch.zeros(current_batch_size, 1, device=device)
+                # LABEL SMOOTHING
+                if label_smoothing > 0:
+                    real_labels = torch.ones(current_batch_size, 1, device=device) - label_smoothing
+                    fake_labels = torch.zeros(current_batch_size, 1, device=device) + label_smoothing
+                else:
+                    real_labels = torch.ones(current_batch_size, 1, device=device)
+                    fake_labels = torch.zeros(current_batch_size, 1, device=device)
+                
+                # ADD NOISE TO DISCRIMINATOR INPUT (optional)
+                if noise_std > 0:
+                    noise_real = torch.randn_like(real_data) * noise_std
+                    real_data_noisy = real_data + noise_real
+                else:
+                    real_data_noisy = real_data
                 
                 # =============
-                # Train Discriminator
+                # Train Discriminator (d_train_steps times)
                 # =============
-                gan.d_optimizer.zero_grad()
-                
-                # Real data
-                real_output = gan.discriminator(real_data)
-                d_loss_real = gan.criterion(real_output, real_labels)
-                
-                # Fake data
-                noise = torch.randn(current_batch_size, latent_dim, device=device)
-                fake_data = gan.generator(noise).detach()  # Detach to avoid training generator
-                fake_output = gan.discriminator(fake_data)
-                d_loss_fake = gan.criterion(fake_output, fake_labels)
-                
-                # Total discriminator loss
-                d_loss = d_loss_real + d_loss_fake
-                d_loss.backward()
-                gan.d_optimizer.step()
+                for d_step in range(d_train_steps):
+                    gan.d_optimizer.zero_grad()
+                    
+                    # Real data
+                    real_output = gan.discriminator(real_data_noisy)
+                    d_loss_real = gan.criterion(real_output, real_labels)
+                    
+                    # Fake data
+                    noise = torch.randn(current_batch_size, latent_dim, device=device)
+                    fake_data = gan.generator(noise).detach()  # Detach to avoid training generator
+                    
+                    # Add noise to fake data too
+                    if noise_std > 0:
+                        noise_fake = torch.randn_like(fake_data) * noise_std
+                        fake_data_noisy = fake_data + noise_fake
+                    else:
+                        fake_data_noisy = fake_data
+                    
+                    fake_output = gan.discriminator(fake_data_noisy)
+                    d_loss_fake = gan.criterion(fake_output, fake_labels)
+                    
+                    # Total discriminator loss
+                    d_loss = (d_loss_real + d_loss_fake) / 2
+                    d_loss.backward()
+                    gan.d_optimizer.step()
                 
                 # =============
-                # Train Generator
+                # Train Generator (g_train_steps times)
                 # =============
-                gan.g_optimizer.zero_grad()
-                
-                # Generate fake data (don't detach this time)
-                noise = torch.randn(current_batch_size, latent_dim, device=device)
-                fake_data = gan.generator(noise)
-                fake_output = gan.discriminator(fake_data)
-                
-                # Generator loss (wants discriminator to think fake data is real)
-                g_loss = gan.criterion(fake_output, real_labels)
-                g_loss.backward()
-                gan.g_optimizer.step()
+                for g_step in range(g_train_steps):
+                    gan.g_optimizer.zero_grad()
+                    
+                    # Generate fake data (don't detach this time)
+                    noise = torch.randn(current_batch_size, latent_dim, device=device)
+                    fake_data = gan.generator(noise)
+                    fake_output = gan.discriminator(fake_data)
+                    
+                    # Generator loss (wants discriminator to think fake data is real)
+                    # Use real_labels to fool discriminator
+                    if label_smoothing > 0:
+                        target_labels = torch.ones(current_batch_size, 1, device=device) - label_smoothing/2
+                    else:
+                        target_labels = torch.ones(current_batch_size, 1, device=device)
+                    
+                    g_loss = gan.criterion(fake_output, target_labels)
+                    g_loss.backward()
+                    gan.g_optimizer.step()
                 
                 # Record batch statistics
                 epoch_g_losses.append(g_loss.item())
@@ -480,10 +502,11 @@ implementation:
                     'image_data': base64_data,
                     'model_type': 'vanilla_gan',
                     'algorithm': algorithm,
+                    'training_type': 'balanced',
                     'epoch': epochs,
                     'image_size': image_size,
                     'channels': channels,
-                    'filename': f'vanilla_gan_sample_{i}.png'
+                    'filename': f'vanilla_gan_balanced_sample_{i}.png'
                 })
         
         print(f"Generated {len(generated_samples)} samples")
@@ -492,6 +515,7 @@ implementation:
         training_metrics = {
             'model_type': 'vanilla_gan',
             'training_algorithm': algorithm,
+            'training_type': 'balanced',
             'architecture': 'fully_connected',
             'epochs_completed': epochs,
             'final_generator_loss': training_history['losses_g'][-1] if training_history['losses_g'] else 1.0,
@@ -508,10 +532,19 @@ implementation:
             'image_size': image_size,
             'channels': channels,
             'batch_size': batch_size,
+            'balanced_training_config': {
+                'generator_lr': generator_lr,
+                'discriminator_lr': discriminator_lr,
+                'd_train_steps': d_train_steps,
+                'g_train_steps': g_train_steps,
+                'label_smoothing': label_smoothing,
+                'noise_std': noise_std
+            },
             'convergence_info': {
                 'generator_converged': training_history['losses_g'][-1] < 2.0 if training_history['losses_g'] else False,
-                'discriminator_converged': training_history['losses_d'][-1] < 2.0 if training_history['losses_d'] else False,
-                'scores_balanced': abs(training_history['real_scores'][-1] - 0.5) < 0.3 and abs(training_history['fake_scores'][-1] - 0.5) < 0.3 if training_history['real_scores'] and training_history['fake_scores'] else False
+                'discriminator_converged': 0.3 < training_history['losses_d'][-1] < 2.0 if training_history['losses_d'] else False,
+                'scores_balanced': (0.3 < training_history['real_scores'][-1] < 0.9) and (0.1 < training_history['fake_scores'][-1] < 0.7) if training_history['real_scores'] and training_history['fake_scores'] else False,
+                'training_stable': abs(training_history['real_scores'][-1] - training_history['fake_scores'][-1]) > 0.1 if training_history['real_scores'] and training_history['fake_scores'] else False
             }
         }
         
@@ -523,13 +556,14 @@ implementation:
         try:
             with open(args.trained_model, 'wb') as f:
                 pickle.dump(gan, f)
-            print(f"Trained model saved: {args.trained_model}")
+            print(f"Balanced trained model saved: {args.trained_model}")
         except Exception as e:
             print(f"Error saving model: {e}")
             # Save minimal state
             model_state = {
                 'model_type': 'vanilla_gan',
                 'algorithm': algorithm,
+                'training_type': 'balanced',
                 'training_completed': True,
                 'final_losses': {
                     'generator': training_history['losses_g'][-1] if training_history['losses_g'] else 1.0,
@@ -559,13 +593,26 @@ implementation:
         print(f"Generated samples saved: {args.generated_samples}")
         
         print("="*60)
-        print("VANILLA GAN TRAINING COMPLETED SUCCESSFULLY!")
+        print("BALANCED VANILLA GAN TRAINING COMPLETED!")
+        print(f"Training Type: BALANCED")
         print(f"Algorithm: {algorithm}")
         print(f"Epochs: {epochs}")
+        print(f"Generator LR: {generator_lr}, Discriminator LR: {discriminator_lr}")
+        print(f"Training Steps - D: {d_train_steps}, G: {g_train_steps}")
         print(f"Final G Loss: {training_metrics['final_generator_loss']:.4f}")
         print(f"Final D Loss: {training_metrics['final_discriminator_loss']:.4f}")
         print(f"Final Real Score: {training_metrics['final_real_score']:.3f}")
         print(f"Final Fake Score: {training_metrics['final_fake_score']:.3f}")
+        
+        # Training quality assessment
+        convergence = training_metrics['convergence_info']
+        if convergence['scores_balanced'] and convergence['training_stable']:
+            print(" TRAINING QUALITY: EXCELLENT - Balanced and stable!")
+        elif convergence['generator_converged'] and convergence['discriminator_converged']:
+            print(" TRAINING QUALITY: GOOD - Both networks converged")
+        else:
+            print("  TRAINING QUALITY: FAIR - Some instability detected")
+        
         print(f"Samples generated: {len(generated_samples)}")
         print(f"Training time: {training_metrics['training_time']:.2f}s")
         print("="*60)
