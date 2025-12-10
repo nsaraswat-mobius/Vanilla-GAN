@@ -233,6 +233,17 @@ implementation:
                 self.criterion = nn.BCELoss()
                 
                 print(f"Optimizers created: G_LR={g_lr}, D_LR={d_lr}")
+
+        # WRAPPER CLASS FOR BUILD BRICK COMPATIBILITY
+        class VanillaGANWrapper:
+            def __init__(self, model_obj):
+                self.model_type = 'vanilla_gan'
+                self.config = model_obj.config.__dict__ if hasattr(model_obj.config, '__dict__') else model_obj.config
+                self.generator_state = model_obj.generator.state_dict()
+                self.discriminator_state = model_obj.discriminator.state_dict()
+                self.generator_arch = model_obj.generator
+                self.discriminator_arch = model_obj.discriminator
+                self.device = str(model_obj.device) if hasattr(model_obj, 'device') else 'cpu'
         
         # Load model with robust error handling
         gan = None
@@ -245,19 +256,27 @@ implementation:
             
             # Handle different model formats from build step
             if hasattr(model_data, 'generator') and hasattr(model_data, 'discriminator'):
-                # Create new balanced GAN with separate learning rates
-                print("Converting to balanced GAN...")
-                config = {
-                    'generator_lr': generator_lr,
-                    'discriminator_lr': discriminator_lr,
-                    'device': 'cpu'
-                }
-                gan = BalancedVanillaGAN(model_data.generator, model_data.discriminator, config)
-                print("Loaded and converted to balanced GAN")
-            
+                # Direct model object (could be SimpleVanillaGAN or BalancedVanillaGAN)
+                print(f"Loading direct model: {type(model_data)}")
+                
+                # Check if it's a balanced GAN
+                if hasattr(model_data, '__class__') and 'Balanced' in str(model_data.__class__):
+                    # It's already a BalancedVanillaGAN, use as-is
+                    gan = model_data
+                    print("Loaded BalancedVanillaGAN directly")
+                else:
+                    # Convert to balanced format for training
+                    config = {
+                        'generator_lr': generator_lr,
+                        'discriminator_lr': discriminator_lr,
+                        'device': 'cpu'
+                    }
+                    gan = BalancedVanillaGAN(model_data.generator, model_data.discriminator, config)
+                    print("Converted to BalancedVanillaGAN for training")
+
             elif hasattr(model_data, 'generator_state') and hasattr(model_data, 'discriminator_state'):
-                # Model wrapper with state dicts
-                print("Loaded VanillaGAN wrapper, reconstructing balanced model...")
+                # Model wrapper with state dicts (from VanillaGANWrapper)
+                print("Reconstructing from VanillaGANWrapper...")
                 config = model_data.config
                 config.update({
                     'generator_lr': generator_lr,
@@ -279,7 +298,18 @@ implementation:
                 discriminator.load_state_dict(model_data.discriminator_state)
                 
                 gan = BalancedVanillaGAN(generator, discriminator, config)
-                print("Successfully reconstructed balanced model from wrapper")
+                print("Successfully reconstructed BalancedVanillaGAN from wrapper")
+
+            elif hasattr(model_data, 'generator_arch') and hasattr(model_data, 'discriminator_arch'):
+                # Architecture-based wrapper from build brick
+                print("Loading from architecture wrapper...")
+                config = {
+                    'generator_lr': generator_lr,
+                    'discriminator_lr': discriminator_lr,
+                    'device': 'cpu'
+                }
+                gan = BalancedVanillaGAN(model_data.generator_arch, model_data.discriminator_arch, config)
+                print("Successfully loaded from architecture wrapper")
             
             else:
                 print(f"Creating new balanced model...")
