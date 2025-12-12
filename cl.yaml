@@ -27,6 +27,8 @@ implementation:
       - sh
       - -c
       - |
+        pip install torchvision==0.15.2 --quiet
+        echo "Torchvision installed"
         exec "$0" "$@"
       - python3
       - -u
@@ -40,11 +42,90 @@ implementation:
         import base64
         import numpy as np
         import torch
+        import torch.nn as nn
         from torch.utils.data import Dataset, Subset
         from PIL import Image
         import io
         import random
         import math
+        
+        # Try to import torchvision, create fallback if not available
+        try:
+            import torchvision
+            print("Torchvision available: {}".format(torchvision.__version__))
+        except ImportError as e:
+            print("Torchvision not available: {}".format(e))
+            # Create minimal fallback for torchvision functionality if needed
+            class MockTorchvision:
+                pass
+            torchvision = MockTorchvision()
+        
+        # =============================================================================
+        # DEFINE MODEL ARCHITECTURES FOR COMPATIBILITY
+        # =============================================================================
+        
+        class VanillaGenerator(nn.Module):
+            def __init__(self, latent_dim, output_dim, hidden_layers=[256, 512, 1024]):
+                super(VanillaGenerator, self).__init__()
+                self.latent_dim = latent_dim
+                self.output_dim = output_dim
+                
+                layers = []
+                current_dim = latent_dim
+                
+                for hidden_dim in hidden_layers:
+                    layers.append(nn.Linear(current_dim, hidden_dim))
+                    layers.append(nn.ReLU())
+                    current_dim = hidden_dim
+                
+                layers.append(nn.Linear(current_dim, output_dim))
+                layers.append(nn.Tanh())
+                
+                self.model = nn.Sequential(*layers)
+            
+            def forward(self, z):
+                return self.model(z)
+        
+        class VanillaDiscriminator(nn.Module):
+            def __init__(self, input_dim, hidden_layers=[1024, 512, 256]):
+                super(VanillaDiscriminator, self).__init__()
+                self.input_dim = input_dim
+                
+                layers = []
+                current_dim = input_dim
+                
+                for hidden_dim in hidden_layers:
+                    layers.append(nn.Linear(current_dim, hidden_dim))
+                    layers.append(nn.LeakyReLU(0.2))
+                    layers.append(nn.Dropout(0.3))
+                    current_dim = hidden_dim
+                
+                layers.append(nn.Linear(current_dim, 1))
+                layers.append(nn.Sigmoid())
+                
+                self.model = nn.Sequential(*layers)
+            
+            def forward(self, x):
+                return self.model(x)
+        
+        class SimpleVanillaGAN:
+            def __init__(self, generator, discriminator, config):
+                self.generator = generator
+                self.discriminator = discriminator
+                self.config = config
+        
+        class BalancedVanillaGAN:
+            def __init__(self, generator, discriminator, config):
+                self.generator = generator
+                self.discriminator = discriminator
+                self.config = config
+                self.device = torch.device(config.get('device', 'cpu'))
+                
+                # For evaluation, we don't need optimizers
+                self.g_optimizer = None
+                self.d_optimizer = None
+                self.criterion = None
+                self.latent_dim = config.get('latent_dim', 100)
         
         # =============================================================================
         # DEFINE VanillaGANDataset CLASS (SAME AS OTHER BRICKS)
@@ -579,13 +660,37 @@ implementation:
             # Parse configuration
             gan_config = json.loads(args.gan_config_json)
             
-            # Load trained model
+            # Load trained model with robust handling
             try:
+                print("Loading trained model...")
+                
+                # First, try to load with custom unpickler to handle missing classes
+                class CustomUnpickler(pickle.Unpickler):
+                    def find_class(self, module, name):
+                        # Handle missing BalancedVanillaGAN class
+                        if name == 'BalancedVanillaGAN':
+                            return BalancedVanillaGAN
+                        elif name == 'SimpleVanillaGAN':
+                            return SimpleVanillaGAN
+                        elif name == 'VanillaGenerator':
+                            return VanillaGenerator
+                        elif name == 'VanillaDiscriminator':
+                            return VanillaDiscriminator
+                        return super().find_class(module, name)
+                
                 with open(args.trained_model, 'rb') as f:
-                    gan_model = pickle.load(f)
+                    try:
+                        gan_model = CustomUnpickler(f).load()
+                    except Exception as pickle_error:
+                        print("Custom unpickler failed: {}".format(pickle_error))
+                        f.seek(0)  # Reset file pointer
+                        gan_model = pickle.load(f)  # Try standard pickle
+                
                 print("Trained Vanilla GAN model loaded: {}".format(type(gan_model).__name__))
             except Exception as e:
                 print("Error loading trained model: {}".format(e))
+                import traceback
+                traceback.print_exc()
                 gan_model = None
             
             # Load preprocessed data
@@ -725,7 +830,25 @@ implementation:
             print("="*60)
         
         if __name__ == '__main__':
-            main()
+            try:
+                main()
+            except Exception as e:
+                print("Error in main: {}".format(e))
+                import traceback
+                traceback.print_exc()
+                # Create minimal fallback outputs
+                import os
+                try:
+                    os.makedirs(os.path.dirname('/tmp/outputs/continual_tasks/data'), exist_ok=True)
+                    with open('/tmp/outputs/continual_tasks/data', 'wb') as f:
+                        pickle.dump([], f)
+                    
+                    os.makedirs(os.path.dirname('/tmp/outputs/continual_config/data'), exist_ok=True)
+                    with open('/tmp/outputs/continual_config/data', 'w') as f:
+                        json.dump({'error': 'continual learning task creation failed', 'message': str(e)}, f)
+                except:
+                    pass
+                exit(1)
 
     args:
       - --trained_model
