@@ -15,17 +15,21 @@ outputs:
     description: Updated master GAN configuration (base64 encoded)
   - name: model_info
     type: String
+
 implementation:
   container:
     image: gurpreetgandhi/nesy-factory:v35
     command:
-      - /bin/sh
+      - sh
       - -c
       - |
         pip install torchvision==0.15.2 --quiet
         echo "Torchvision installed"
-        # Execute the Python script with proper argument handling
-        python3 -u -c "
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
         import argparse
         import os
         import sys
@@ -44,17 +48,17 @@ implementation:
         parser.add_argument('--model_info', type=str, required=True, help='Output path for model info')
         args = parser.parse_args()
         
-        print('VANILLA GAN MODEL BUILDER STARTING')
-        print('='*60)
-        print(f'gan_config_json length: {len(args.gan_config_json)}')
-        print(f'model_name: {args.model_name}')
+        print("VANILLA GAN MODEL BUILDER STARTING")
+        print("="*60)
+        print(f"gan_config_json length: {len(args.gan_config_json)}")
+        print(f"model_name: {args.model_name}")
         
         # Parse JSON config
         try:
             gan_config = json.loads(args.gan_config_json)
-            print('Master GAN config parsed successfully')
+            print("Master GAN config parsed successfully")
         except Exception as e:
-            print(f'Failed to parse JSON config: {e}')
+            print(f"Failed to parse JSON config: {e}")
             traceback.print_exc()
             sys.exit(1)
         
@@ -63,17 +67,17 @@ implementation:
         # Force model type to vanilla_gan
         model_config['gan_type'] = 'vanilla_gan'
         model_type = 'vanilla_gan'
-        print(f'Building {model_type.upper()} model')
+        print(f"Building {model_type.upper()} model")
         
         # Import torch
         try:
             import torch
             import torch.nn as nn
             import torch.nn.functional as F
-            print(f'PyTorch version: {torch.__version__}')
-            print(f'CUDA available: {torch.cuda.is_available()}')
+            print(f"PyTorch version: {torch.__version__}")
+            print(f"CUDA available: {torch.cuda.is_available()}")
         except ImportError as e:
-            print(f'Failed to import torch: {e}')
+            print(f"Failed to import torch: {e}")
             sys.exit(1)
         
         # Define Vanilla GAN architecture directly
@@ -309,20 +313,20 @@ implementation:
                         config.discriminator_layers,
                         config.__dict__
                     ).to(self.device)
-                    print(f'Created Forward-Forward discriminator with {len(config.discriminator_layers)} blocks')
+                    print(f"Created Forward-Forward discriminator with {len(config.discriminator_layers)} blocks")
                 elif algorithm == 'cafo':
                     self.discriminator = CAFODiscriminator(
                         config.input_dim, 
                         config.discriminator_layers,
                         config.__dict__
                     ).to(self.device)
-                    print(f'Created CAFO discriminator with {len(config.discriminator_layers)} blocks')
+                    print(f"Created CAFO discriminator with {len(config.discriminator_layers)} blocks")
                 else:
                     self.discriminator = VanillaDiscriminator(
                         config.input_dim, 
                         config.discriminator_layers
                     ).to(self.device)
-                    print('Created standard Vanilla discriminator')
+                    print("Created standard Vanilla discriminator")
                 
                 # Initialize weights
                 self._initialize_weights()
@@ -342,10 +346,10 @@ implementation:
                 # Loss function
                 self.criterion = nn.BCELoss()
                 
-                print(f'Vanilla GAN initialized:')
-                print(f'  Generator: {sum(p.numel() for p in self.generator.parameters())} parameters')
-                print(f'  Discriminator: {sum(p.numel() for p in self.discriminator.parameters())} parameters')
-                print(f'  Device: {self.device}')
+                print(f"Vanilla GAN initialized:")
+                print(f"  Generator: {sum(p.numel() for p in self.generator.parameters())} parameters")
+                print(f"  Discriminator: {sum(p.numel() for p in self.discriminator.parameters())} parameters")
+                print(f"  Device: {self.device}")
             
             def _initialize_weights(self):
                 for module in [self.generator, self.discriminator]:
@@ -398,12 +402,12 @@ implementation:
         elif use_cafo:
             algorithm = 'cafo'
         
-        print(f'Building {model_type.upper()} with {algorithm.upper()} algorithm')
-        print(f'Forward-Forward: {use_forward_forward}, CAFO: {use_cafo}')
+        print(f"Building {model_type.upper()} with {algorithm.upper()} algorithm")
+        print(f"Forward-Forward: {use_forward_forward}, CAFO: {use_cafo}")
         
         # Build Vanilla GAN model
         try:
-            print('Creating Vanilla GAN model...')
+            print("Creating Vanilla GAN model...")
             
             # Extract configuration from master config
             vanilla_config_dict = {
@@ -430,38 +434,38 @@ implementation:
                 'discriminator_dropout': model_config.get('discriminator_dropout', 0.3)
             }
             
-            print(f'Vanilla GAN config: {vanilla_config_dict}')
+            print(f"Vanilla GAN config: {vanilla_config_dict}")
             vanilla_config = VanillaGANConfig(**vanilla_config_dict)
             model = VanillaGAN(vanilla_config)
             
-            print('Vanilla GAN model created successfully')
+            print("Vanilla GAN model created successfully")
                 
         except Exception as e:
-            print(f'Failed to create Vanilla GAN model: {e}')
+            print(f"Failed to create Vanilla GAN model: {e}")
             traceback.print_exc()
             sys.exit(1)
         
         if model is None:
-            print('Model creation failed')
+            print("Model creation failed")
             sys.exit(1)
         
         # Test model
-        print('Testing Vanilla GAN model...')
+        print("Testing Vanilla GAN model...")
         try:
             # Test generator
             z = torch.randn(4, model.config.latent_dim, device=model.device)
             with torch.no_grad():
                 samples = model.generator(z)
-            print(f'Generator test passed. Output shape: {samples.shape}')
+            print(f"Generator test passed. Output shape: {samples.shape}")
             
             # Test discriminator
             fake_data = torch.randn(4, model.config.input_dim, device=model.device)
             with torch.no_grad():
                 pred = model.discriminator(fake_data)
-            print(f'Discriminator test passed. Output shape: {pred.shape}')
+            print(f"Discriminator test passed. Output shape: {pred.shape}")
             
         except Exception as e:
-            print(f'Model test failed: {e}')
+            print(f"Model test failed: {e}")
             traceback.print_exc()
         
         # Update master config with build information
@@ -532,7 +536,7 @@ implementation:
         updated_config_base64 = base64.b64encode(updated_config_json.encode('utf-8')).decode('utf-8')
         
         # Save outputs with better error handling
-        print('Saving model outputs...')
+        print("Saving model outputs...")
         
         # Save model
         os.makedirs(os.path.dirname(args.model_out) or '.', exist_ok=True)
@@ -552,10 +556,10 @@ implementation:
             wrapper = VanillaGANWrapper(model)
             with open(args.model_out, 'wb') as f:
                 pickle.dump(wrapper, f, protocol=pickle.HIGHEST_PROTOCOL)
-            print(f'Model saved successfully: {args.model_out}')
+            print(f"Model saved successfully: {args.model_out}")
             
         except Exception as e:
-            print(f'Failed to save full model, saving state dict: {e}')
+            print(f"Failed to save full model, saving state dict: {e}")
             # Fallback: save only state dicts and config
             model_state = {
                 'model_type': 'vanilla_gan',
@@ -566,7 +570,7 @@ implementation:
             }
             with open(args.model_out, 'wb') as f:
                 pickle.dump(model_state, f, protocol=pickle.HIGHEST_PROTOCOL)
-            print(f'Model state saved: {args.model_out}')
+            print(f"Model state saved: {args.model_out}")
         
         # Save updated config
         os.makedirs(os.path.dirname(args.gan_config_base64_updated) or '.', exist_ok=True)
@@ -578,20 +582,20 @@ implementation:
         with open(args.model_info, 'w') as f:
             json.dump(model_info_data, f, indent=2)
         
-        print('='*60)
-        print('Vanilla GAN Build completed successfully')
-        print(f'Algorithm: {algorithm.upper()}')
-        print(f'Discriminator Type: {model_info[\"discriminator_type\"]}')
-        print(f'Forward-Forward: {use_forward_forward}')
-        print(f'CAFO: {use_cafo}')
-        print(f'Model saved: {args.model_out}')
-        print(f'Config (base64) saved: {args.gan_config_base64_updated}')
-        print(f'Model info saved: {args.model_info}')
-        print(f'Generator parameters: {sum(p.numel() for p in model.generator.parameters()):,}')
-        print(f'Discriminator parameters: {sum(p.numel() for p in model.discriminator.parameters()):,}')
-        print(f'Device: {model.device}')
-        print('='*60)
-        " "$@"
+        print("="*60)
+        print("Vanilla GAN Build completed successfully")
+        print(f"Algorithm: {algorithm.upper()}")
+        print(f"Discriminator Type: {model_info['discriminator_type']}")
+        print(f"Forward-Forward: {use_forward_forward}")
+        print(f"CAFO: {use_cafo}")
+        print(f"Model saved: {args.model_out}")
+        print(f"Config (base64) saved: {args.gan_config_base64_updated}")
+        print(f"Model info saved: {args.model_info}")
+        print(f"Generator parameters: {sum(p.numel() for p in model.generator.parameters()):,}")
+        print(f"Discriminator parameters: {sum(p.numel() for p in model.discriminator.parameters()):,}")
+        print(f"Device: {model.device}")
+        print("="*60)
+
     args:
       - --gan_config_json
       - {inputValue: gan_config_json}
