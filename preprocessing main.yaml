@@ -1,0 +1,219 @@
+name: Preprocess for Vanilla GAN
+description: Preprocesses dataset for Vanilla GAN training and updates master config
+inputs:
+  - name: train_data
+    type: Dataset
+  - name: dataset_info
+    type: DatasetInfo
+  - name: gan_config_json
+    type: String
+    description: Master GAN configuration as JSON string
+outputs:
+  - name: processed_data
+    type: Dataset
+  - name: gan_config_base64
+    type: String
+    description: Updated master GAN configuration
+
+implementation:
+  container:
+    image: namaniisc/nesy-factory:latest
+    command:
+      - sh
+      - -c
+      - |
+        echo "Using nesy-factory with torch 2.2.0 and torchvision 0.17.0"
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import json
+        import pickle
+        import base64
+        import io
+        import torch
+        import torchvision.transforms as transforms
+        from PIL import Image
+        import time
+        import numpy as np
+        import sys
+        
+        # Import VanillaGANDataset from nesy_factory
+        sys.path.insert(0, '/app/src')
+        from nesy_factory.GANs.vanilla_gan import VanillaGANDataset
+        
+        parser = argparse.ArgumentParser(description='Vanilla GAN Preprocessing')
+        parser.add_argument('--train_data', type=str, required=True, help='Path to train data')
+        parser.add_argument('--dataset_info', type=str, required=True, help='Path to dataset info')
+        parser.add_argument('--gan_config_json', type=str, required=True, help='Master GAN config as JSON string')
+        parser.add_argument('--processed_data', type=str, required=True, help='Output path for processed data')
+        parser.add_argument('--gan_config_base64', type=str, required=True, help='Output path for updated GAN config (base64)')
+        args = parser.parse_args()
+        
+        print("VANILLA GAN PREPROCESSING STARTING")
+        print("="*60)
+        print(f"gan_config_json length: {len(args.gan_config_json)}")
+        print(f"gan_config_json preview: {args.gan_config_json[:200]}...")
+        
+        # Parse master config (JSON string)
+        try:
+            gan_config = json.loads(args.gan_config_json)
+            print("Master GAN config parsed successfully")
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse JSON config: {e}")
+            # Create default config for Vanilla GAN
+            gan_config = {
+                'pipeline_name': 'vanilla_gan_pipeline',
+                'version': '1.0.0',
+                'dataset': {},
+                'model': {'gan_type': 'vanilla_gan'},
+                'training': {},
+                'evaluation': {},
+                'paths': {},
+                'metadata': {'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ')}
+            }
+        
+        # Load data
+        with open(args.train_data, 'rb') as f:
+            train_data = pickle.load(f)
+        
+        with open(args.dataset_info, 'rb') as f:
+            dataset_info = pickle.load(f)
+        
+        print(f"Train data samples: {len(train_data)}")
+        
+        # Force model type to vanilla_gan
+        model_type = 'vanilla_gan'
+        
+        # Get image size from config or use smaller default for vanilla GAN
+        image_size = gan_config.get('dataset', {}).get('image_size', 28)  # Smaller default for vanilla GAN
+        channels = gan_config.get('dataset', {}).get('channels', 1)  # Default to grayscale for simplicity
+        
+        print(f"Processing for {model_type.upper()}")
+        print(f"Image size: {image_size}x{image_size}")
+        print(f"Channels: {channels}")
+        
+        # VanillaGANDataset is now imported from vanilla_gan.py
+        # No need to redefine the class here
+        
+        # Create transform specifically for Vanilla GAN
+        if channels == 1:
+            transform = transforms.Compose([
+                transforms.Resize(image_size),
+                transforms.CenterCrop(image_size),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5,), (0.5,))  # Normalize to [-1, 1]
+            ])
+        else:
+            transform = transforms.Compose([
+                transforms.Resize(image_size),
+                transforms.CenterCrop(image_size),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Normalize to [-1, 1]
+            ])
+        
+        # Create dataset
+        dataset = VanillaGANDataset(train_data, transform, image_size, channels)
+        
+        # Calculate input dimension for vanilla GAN (flattened)
+        input_dim = image_size * image_size * channels
+        print(f"Vanilla GAN input dimension (flattened): {input_dim}")
+        
+        # Create data wrapper with Vanilla GAN specific information
+        data_wrapper = {
+            'dataset': dataset,
+            'model_type': model_type,
+            'input_dim': input_dim,
+            'image_size': image_size,
+            'channels': channels,
+            'num_samples': len(dataset),
+            'is_flattened': True,  # Always True for Vanilla GAN
+            'output_shape': (channels, image_size, image_size),  # For reconstruction
+            'flat_shape': (input_dim,),  # Flattened shape
+            'data_range': [-1, 1],  # After normalization
+            'preprocessing_info': {
+                'resize': image_size,
+                'normalize_mean': 0.5,
+                'normalize_std': 0.5,
+                'flattened': True
+            }
+        }
+        
+        # Save processed data
+        os.makedirs(os.path.dirname(args.processed_data) or '.', exist_ok=True)
+        with open(args.processed_data, 'wb') as f:
+            pickle.dump(data_wrapper, f)
+        print(f"Processed data saved: {args.processed_data}")
+        
+        # Update master config with Vanilla GAN specific settings
+        gan_config['dataset'].update({
+            'processed_samples': len(dataset),
+            'actual_image_size': image_size,
+            'actual_channels': channels,
+            'input_dim': input_dim,
+            'is_flattened': True,
+            'data_range': [-1, 1]
+        })
+        
+        gan_config['model'].update({
+            'model_type': model_type,
+            'gan_type': 'vanilla_gan',
+            'input_dim': input_dim,
+            'image_size': image_size,
+            'channels': channels,
+            'architecture': 'fully_connected',
+            'data_format': 'flattened'
+        })
+        
+        # Add recommended hyperparameters for Vanilla GAN
+        if 'training' not in gan_config:
+            gan_config['training'] = {}
+        
+        gan_config['training'].update({
+            'recommended_lr': 0.0002,
+            'recommended_batch_size': 64,
+            'recommended_epochs': 200,
+            'optimizer': 'Adam',
+            'loss_function': 'BCELoss',
+            'architecture_type': 'fully_connected'
+        })
+        
+        gan_config['metadata'].update({
+            'preprocessed_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'preprocessing_step': 'completed',
+            'gan_variant': 'vanilla_gan',
+            'data_format': 'flattened_vectors'
+        })
+        
+        # Encode to base64 for next bricks
+        config_json = json.dumps(gan_config, indent=2)
+        config_base64 = base64.b64encode(config_json.encode('utf-8')).decode('utf-8')
+        
+        # Save base64 config
+        os.makedirs(os.path.dirname(args.gan_config_base64) or '.', exist_ok=True)
+        with open(args.gan_config_base64, 'w') as f:
+            f.write(config_base64)
+        
+        print("="*60)
+        print("Vanilla GAN Preprocessing completed successfully")
+        print(f"Processed data: {args.processed_data}")
+        print(f"Config (base64) saved: {args.gan_config_base64}")
+        print(f"Config size: {len(config_base64)} bytes")
+        print(f"Input dimension (flattened): {input_dim}")
+        print(f"Output shape: {channels}x{image_size}x{image_size}")
+        print("="*60)
+
+    args:
+      - --train_data
+      - {inputPath: train_data}
+      - --dataset_info
+      - {inputPath: dataset_info}
+      - --gan_config_json
+      - {inputValue: gan_config_json}
+      - --processed_data
+      - {outputPath: processed_data}
+      - --gan_config_base64
+      - {outputPath: gan_config_base64}
