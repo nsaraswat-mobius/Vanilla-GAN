@@ -1,0 +1,423 @@
+name: Load MNIST Dataset for Vanilla GAN
+description: Specialized MNIST dataset loader optimized for Vanilla GAN with flattened 784-dimensional vectors
+inputs:
+  - name: dataset_subset
+    type: String
+    default: 'full'
+    description: "Dataset subset: 'full', 'small' (1000 samples), 'medium' (5000 samples), 'large' (10000 samples)"
+  - name: digits_filter
+    type: String
+    default: 'all'
+    description: "Filter specific digits: 'all', '0-4', '5-9', or comma-separated list like '0,1,2'"
+  - name: config_json
+    type: String
+    description: "JSON configuration for dataset processing"
+  - name: train_split
+    type: Float
+    default: '0.8'
+    description: "Train split ratio"
+  - name: shuffle_seed
+    type: Integer
+    default: '42'
+    description: "Random seed for shuffling"
+outputs:
+  - name: train_data
+    type: Dataset
+  - name: test_data
+    type: Dataset
+  - name: dataset_info
+    type: DatasetInfo
+  - name: data_config
+    type: String
+    description: "Data configuration for next steps"
+
+implementation:
+  container:
+    image: namaniisc/nesy-factory:latest
+    command:
+      - sh
+      - -c
+      - |
+        set -e  # Exit on any error
+        
+        echo "Installing torchvision for MNIST..."
+        pip install torchvision==0.15.2 --no-cache-dir --quiet || \
+        pip install torchvision --no-cache-dir --quiet
+        
+        echo "Verifying torchvision installation..."
+        python -c "import torchvision; print(f'Torchvision version: {torchvision.__version__}')"
+        
+        echo "Starting MNIST dataset loader for Vanilla GAN..."
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import json
+        import pickle
+        import base64
+        import io
+        import numpy as np
+        import torch
+        from torch.utils.data import Dataset, DataLoader, random_split
+        from PIL import Image
+        import random
+        from collections import Counter
+        import math
+        
+        parser = argparse.ArgumentParser(description='MNIST Dataset Loader for Vanilla GAN')
+        parser.add_argument('--dataset_subset', type=str, default='full')
+        parser.add_argument('--digits_filter', type=str, default='all')
+        parser.add_argument('--config_json', type=str, required=True)
+        parser.add_argument('--train_split', type=float, required=True)
+        parser.add_argument('--shuffle_seed', type=int, required=True)
+        parser.add_argument('--train_data', type=str, required=True)
+        parser.add_argument('--test_data', type=str, required=True)
+        parser.add_argument('--dataset_info', type=str, required=True)
+        parser.add_argument('--data_config', type=str, required=True)
+        args = parser.parse_args()
+        
+        print('MNIST Dataset Loader for Vanilla GAN')
+        print('=' * 50)
+        
+        print('Parameters:')
+        print(f'  Dataset Subset: {args.dataset_subset}')
+        print(f'  Digits Filter: {args.digits_filter}')
+        print(f'  Train Split: {args.train_split}')
+        print(f'  Shuffle Seed: {args.shuffle_seed}')
+        
+        # Parse config
+        config = json.loads(args.config_json) if args.config_json else {}
+        
+        # Set random seeds for reproducibility
+        random.seed(args.shuffle_seed)
+        np.random.seed(args.shuffle_seed)
+        torch.manual_seed(args.shuffle_seed)
+        
+        def load_mnist_dataset():
+            print('Loading MNIST dataset...')
+            
+            try:
+                from torchvision import datasets, transforms
+                
+                # Load MNIST training data
+                transform = transforms.Compose([transforms.ToTensor()])
+                
+                mnist_train = datasets.MNIST(
+                    root='./data/mnist', 
+                    train=True, 
+                    download=True, 
+                    transform=transform
+                )
+                
+                mnist_test = datasets.MNIST(
+                    root='./data/mnist', 
+                    train=False, 
+                    download=True, 
+                    transform=transform
+                )
+                
+                print(f'MNIST loaded: {len(mnist_train)} train + {len(mnist_test)} test samples')
+                
+                # Combine train and test for our own split
+                combined_data = []
+                combined_labels = []
+                
+                # Add training data
+                for idx in range(len(mnist_train)):
+                    img, label = mnist_train[idx]
+                    combined_data.append(img)
+                    combined_labels.append(label)
+                
+                # Add test data
+                for idx in range(len(mnist_test)):
+                    img, label = mnist_test[idx]
+                    combined_data.append(img)
+                    combined_labels.append(label)
+                
+                return combined_data, combined_labels
+                
+            except Exception as e:
+                print(f'Failed to load MNIST: {e}')
+                import traceback
+                traceback.print_exc()
+                return [], []
+        
+        def filter_digits(data, labels, digits_filter):
+            if digits_filter == 'all':
+                return data, labels
+            
+            print(f'Filtering digits: {digits_filter}')
+            
+            # Parse digits filter
+            if digits_filter == '0-4':
+                allowed_digits = [0, 1, 2, 3, 4]
+            elif digits_filter == '5-9':
+                allowed_digits = [5, 6, 7, 8, 9]
+            else:
+                # Parse comma-separated list
+                try:
+                    allowed_digits = [int(d.strip()) for d in digits_filter.split(',')]
+                except:
+                    print(f'Invalid digits filter: {digits_filter}, using all digits')
+                    return data, labels
+            
+            # Filter data
+            filtered_data = []
+            filtered_labels = []
+            
+            for img, label in zip(data, labels):
+                if label in allowed_digits:
+                    filtered_data.append(img)
+                    filtered_labels.append(label)
+            
+            print(f'Filtered from {len(data)} to {len(filtered_data)} samples')
+            print(f'Allowed digits: {sorted(allowed_digits)}')
+            
+            return filtered_data, filtered_labels
+        
+        def limit_dataset_size(data, labels, subset_type):
+            if subset_type == 'full':
+                return data, labels
+            
+            size_map = {
+                'small': 1000,
+                'medium': 5000,
+                'large': 10000
+            }
+            
+            target_size = size_map.get(subset_type, len(data))
+            
+            if target_size >= len(data):
+                return data, labels
+            
+            print(f'Limiting dataset to {target_size} samples (from {len(data)})')
+            
+            # Create balanced subset
+            unique_labels = sorted(list(set(labels)))
+            samples_per_class = target_size // len(unique_labels)
+            remainder = target_size % len(unique_labels)
+            
+            selected_data = []
+            selected_labels = []
+            
+            for i, label in enumerate(unique_labels):
+                # Get indices for this label
+                label_indices = [idx for idx, l in enumerate(labels) if l == label]
+                
+                # Determine how many samples for this class
+                class_samples = samples_per_class
+                if i < remainder:
+                    class_samples += 1
+                
+                # Randomly select samples
+                if len(label_indices) > class_samples:
+                    selected_indices = random.sample(label_indices, class_samples)
+                else:
+                    selected_indices = label_indices
+                
+                # Add selected samples
+                for idx in selected_indices:
+                    selected_data.append(data[idx])
+                    selected_labels.append(labels[idx])
+            
+            # Shuffle the selected data
+            combined = list(zip(selected_data, selected_labels))
+            random.shuffle(combined)
+            selected_data, selected_labels = zip(*combined)
+            
+            print(f'Selected {len(selected_data)} samples across {len(unique_labels)} classes')
+            
+            return list(selected_data), list(selected_labels)
+        
+        def convert_to_vanilla_gan_format(data, labels):
+            print('Converting to Vanilla GAN format...')
+            
+            dataset = []
+            
+            for idx, (img_tensor, label) in enumerate(zip(data, labels)):
+                try:
+                    # img_tensor is already a PyTorch tensor (1, 28, 28)
+                    # Convert to numpy for PIL Image
+                    img_np = img_tensor.squeeze(0).numpy()  # Remove channel dimension -> (28, 28)
+                    
+                    # Convert to PIL Image (0-255 range)
+                    img_pil = Image.fromarray((img_np * 255).astype(np.uint8), mode='L')
+                    
+                    # Convert to base64 for storage (same format as your universal loader)
+                    img_bytes = io.BytesIO()
+                    img_pil.save(img_bytes, format='PNG')
+                    base64_data = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
+                    
+                    # Create data entry
+                    data_entry = {
+                        'image_data': base64_data,
+                        'label': str(label),
+                        'digit': label,
+                        'dataset': 'mnist',
+                        'index': idx,
+                        'image_size': 28,
+                        'channels': 1,
+                        'flattened_dim': 784,
+                        'vanilla_gan_ready': True
+                    }
+                    
+                    dataset.append(data_entry)
+                    
+                except Exception as e:
+                    print(f'Failed to process sample {idx}: {e}')
+                    continue
+            
+            print(f'Converted {len(dataset)} samples to Vanilla GAN format')
+            return dataset
+        
+        # Main execution
+        print('\\nLoading MNIST...')
+        raw_data, raw_labels = load_mnist_dataset()
+        
+        if not raw_data:
+            print('Failed to load MNIST data')
+            # Create dummy data
+            dummy_data = [{'image_data': '', 'label': '0', 'error': 'mnist_load_failed'}]
+            train_data = dummy_data
+            test_data = []
+        else:
+            print(f'Loaded {len(raw_data)} MNIST samples')
+            
+            # Filter digits if specified
+            filtered_data, filtered_labels = filter_digits(raw_data, raw_labels, args.digits_filter)
+            
+            # Limit dataset size if specified
+            limited_data, limited_labels = limit_dataset_size(filtered_data, filtered_labels, args.dataset_subset)
+            
+            # Convert to Vanilla GAN format
+            vanilla_gan_dataset = convert_to_vanilla_gan_format(limited_data, limited_labels)
+            
+            # Split into train/test
+            total_samples = len(vanilla_gan_dataset)
+            train_size = int(args.train_split * total_samples)
+            test_size = total_samples - train_size
+            
+            if train_size > 0 and test_size > 0:
+                # Shuffle dataset
+                random.shuffle(vanilla_gan_dataset)
+                
+                train_data = vanilla_gan_dataset[:train_size]
+                test_data = vanilla_gan_dataset[train_size:]
+                
+                print(f'Split: {len(train_data)} train, {len(test_data)} test')
+            else:
+                print('Dataset too small for splitting, using all data for training')
+                train_data = vanilla_gan_dataset
+                test_data = []
+        
+        # Create dataset info
+        all_labels = [item.get('label', '0') for item in train_data + test_data]
+        unique_labels = sorted(list(set(all_labels)))
+        label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
+        label_distribution = Counter(all_labels)
+        
+        dataset_info = {
+            'total_samples': len(train_data) + len(test_data),
+            'train_samples': len(train_data),
+            'test_samples': len(test_data),
+            'classes': unique_labels,
+            'class_distribution': dict(label_distribution),
+            'label_to_idx': label_to_idx,
+            'output_dim': len(unique_labels),
+            'train_split_ratio': args.train_split,
+            'shuffle_seed': args.shuffle_seed,
+            'dataset_type': 'mnist',
+            'dataset_name': 'mnist',
+            'subset_type': args.dataset_subset,
+            'digits_filter': args.digits_filter,
+            'image_size': 28,
+            'channels': 1,
+            'flattened_dim': 784,
+            'vanilla_gan_optimized': True,
+            'original_path': 'torchvision.datasets.MNIST'
+        }
+        
+        # Create data configuration for Vanilla GAN
+        data_config = {
+            'dataset_type': 'mnist',
+            'dataset_name': 'mnist',
+            'num_classes': len(unique_labels),
+            'image_size': 28,
+            'channels': 1,
+            'input_dim': 784,  # Flattened dimension for Vanilla GAN
+            'requires_preprocessing': True,
+            'has_labels': len(unique_labels) > 1,
+            'sample_count': len(train_data) + len(test_data),
+            'vanilla_gan_specific': {
+                'flattened_input': True,
+                'normalization_range': '[-1, 1]',
+                'architecture': 'fully_connected',
+                'recommended_latent_dim': 100,
+                'recommended_generator_layers': [256, 512, 1024],
+                'recommended_discriminator_layers': [1024, 512, 256]
+            },
+            'digit_classes': unique_labels,
+            'balanced_classes': len(set(label_distribution.values())) <= 2,  # Roughly balanced
+            'subset_info': {
+                'subset_type': args.dataset_subset,
+                'digits_filter': args.digits_filter,
+                'total_available': 70000  # Full MNIST size
+            }
+        }
+        
+        # Save outputs
+        print('\\nSaving outputs...')
+        
+        os.makedirs(os.path.dirname(args.train_data), exist_ok=True)
+        with open(args.train_data, 'wb') as f:
+            pickle.dump(train_data, f)
+        
+        os.makedirs(os.path.dirname(args.test_data), exist_ok=True)
+        with open(args.test_data, 'wb') as f:
+            pickle.dump(test_data, f)
+        
+        os.makedirs(os.path.dirname(args.dataset_info), exist_ok=True)
+        with open(args.dataset_info, 'wb') as f:
+            pickle.dump(dataset_info, f)
+        
+        os.makedirs(os.path.dirname(args.data_config), exist_ok=True)
+        with open(args.data_config, 'w') as f:
+            json.dump(data_config, f, indent=2)
+        
+        # Print summary
+        print('\\n' + '='*50)
+        print('MNIST DATASET LOADING COMPLETE!')
+        print('='*50)
+        print(f'Dataset: MNIST ({args.dataset_subset} subset)')
+        print(f'Digits: {args.digits_filter}')
+        print(f'Train samples: {len(train_data)}')
+        print(f'Test samples: {len(test_data)}')
+        print(f'Classes: {unique_labels}')
+        print(f'Image format: 28x28 grayscale (784 flattened)')
+        print(f'Data format: Base64 encoded PNG (compatible with Vanilla GAN)')
+        print(f'Normalization: Ready for [-1, 1] range')
+        print(f'Architecture: Optimized for fully connected layers')
+        print('='*50)
+
+    args:
+      - --dataset_subset
+      - {inputValue: dataset_subset}
+      - --digits_filter
+      - {inputValue: digits_filter}
+      - --config_json
+      - {inputValue: config_json}
+      - --train_split
+      - {inputValue: train_split}
+      - --shuffle_seed
+      - {inputValue: shuffle_seed}
+      - --train_data
+      - {outputPath: train_data}
+      - --test_data
+      - {outputPath: test_data}
+      - --dataset_info
+      - {outputPath: dataset_info}
+      - --data_config
+      - {outputPath: data_config}
