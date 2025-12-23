@@ -1,0 +1,321 @@
+name: Build Vanilla GAN Model
+description: Builds Vanilla GAN model using master config with fully connected architecture
+inputs:
+  - name: gan_config_json
+    type: String
+    description: Master GAN configuration as JSON string
+  - name: model_name
+    type: String
+    description: Model name (vanilla_gan)
+outputs:
+  - name: model_out
+    type: Model
+  - name: gan_config_base64_updated
+    type: String
+    description: Updated master GAN configuration (base64 encoded)
+  - name: model_info
+    type: String
+
+implementation:
+  container:
+    image: namaniisc/nesy-factory:latest
+    command:
+      - sh
+      - -c
+      - |
+        echo "Using nesy-factory with torch 2.2.0 and torchvision 0.17.0"
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import sys
+        import json
+        import pickle
+        import base64
+        import traceback
+        import time
+        import importlib.util
+        
+        parser = argparse.ArgumentParser(description='Vanilla GAN Model Builder')
+        parser.add_argument('--gan_config_json', type=str, required=True, help='Master GAN config as JSON string')
+        parser.add_argument('--model_name', type=str, required=True, help='Model name (vanilla_gan)')
+        parser.add_argument('--model_out', type=str, required=True, help='Output path for model')
+        parser.add_argument('--gan_config_base64_updated', type=str, required=True, help='Output path for updated config (base64)')
+        parser.add_argument('--model_info', type=str, required=True, help='Output path for model info')
+        args = parser.parse_args()
+        
+        print("VANILLA GAN MODEL BUILDER STARTING")
+        print("="*60)
+        print(f"gan_config_json length: {len(args.gan_config_json)}")
+        print(f"model_name: {args.model_name}")
+        
+        # Parse JSON config
+        try:
+            gan_config = json.loads(args.gan_config_json)
+            print("Master GAN config parsed successfully")
+        except Exception as e:
+            print(f"Failed to parse JSON config: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+        
+        model_config = gan_config.get('model', {})
+        
+        # Force model type to vanilla_gan
+        model_config['gan_type'] = 'vanilla_gan'
+        model_type = 'vanilla_gan'
+        print(f"Building {model_type.upper()} model")
+        
+        # Import torch
+        try:
+            import torch
+            import torch.nn as nn
+            import torch.nn.functional as F
+            print(f"PyTorch version: {torch.__version__}")
+            print(f"CUDA available: {torch.cuda.is_available()}")
+        except ImportError as e:
+            print(f"Failed to import torch: {e}")
+            sys.exit(1)
+        
+        # Import all classes from vanilla_gan.py instead of redefining them
+        sys.path.insert(0, '/app/src')
+        try:
+            from nesy_factory.GANs.vanilla_gan import (
+                VanillaGenerator,
+                VanillaDiscriminator,
+                ForwardForwardDiscriminatorBlock,
+                ForwardForwardDiscriminator,
+                CAFODiscriminatorBlock,
+                CAFODiscriminator,
+                VanillaGANConfig,
+                VanillaGAN
+            )
+            print("✓ Successfully imported all Vanilla GAN classes from nesy_factory")
+        except ImportError as e:
+            print(f"Failed to import from nesy_factory: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+        
+        # All classes are now imported from vanilla_gan.py
+        # No need to redefine them here
+        
+        model = None
+        
+        # Get algorithm configuration
+        algorithm = model_config.get('training_algorithm', 'backprop')
+        use_forward_forward = model_config.get('use_forward_forward', False)
+        use_cafo = model_config.get('use_cafo', False)
+        
+        # Handle boolean overrides
+        if use_forward_forward:
+            algorithm = 'forward_forward'
+        elif use_cafo:
+            algorithm = 'cafo'
+        
+        print(f"Building {model_type.upper()} with {algorithm.upper()} algorithm")
+        print(f"Forward-Forward: {use_forward_forward}, CAFO: {use_cafo}")
+        
+        # Build Vanilla GAN model
+        try:
+            print("Creating Vanilla GAN model...")
+            
+            # Extract configuration from master config
+            vanilla_config_dict = {
+                'input_dim': model_config.get('input_dim', 784),
+                'latent_dim': model_config.get('latent_dim', 100),
+                'generator_layers': model_config.get('generator_layers', [256, 512, 1024]),
+                'discriminator_layers': model_config.get('discriminator_layers', [1024, 512, 256]),
+                'lr': model_config.get('learning_rate', 0.0002),
+                'batch_size': model_config.get('batch_size', 64),
+                'epochs': model_config.get('epochs', 200),
+                'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+                'training_algorithm': algorithm,
+                'use_forward_forward': use_forward_forward,
+                'use_cafo': use_cafo,
+                'use_wgan': model_config.get('use_wgan', False),
+                'ff_theta': model_config.get('ff_theta', 2.0),
+                'ff_positive_margin': model_config.get('ff_positive_margin', 2.0),
+                'ff_negative_margin': model_config.get('ff_negative_margin', 0.0),
+                'ff_blocks': model_config.get('ff_blocks', 3),
+                'ff_epochs_per_block': model_config.get('ff_epochs_per_block', 10),
+                'cafo_blocks': model_config.get('cafo_blocks', 3),
+                'epochs_per_block': model_config.get('epochs_per_block', 10),
+                'block_lr': model_config.get('block_lr', 0.001),
+                'discriminator_dropout': model_config.get('discriminator_dropout', 0.3)
+            }
+            
+            print(f"Vanilla GAN config: {vanilla_config_dict}")
+            vanilla_config = VanillaGANConfig(**vanilla_config_dict)
+            model = VanillaGAN(vanilla_config)
+            
+            print("Vanilla GAN model created successfully")
+                
+        except Exception as e:
+            print(f"Failed to create Vanilla GAN model: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+        
+        if model is None:
+            print("Model creation failed")
+            sys.exit(1)
+        
+        # Test model
+        print("Testing Vanilla GAN model...")
+        try:
+            # Test generator
+            z = torch.randn(4, model.config.latent_dim, device=model.device)
+            with torch.no_grad():
+                samples = model.generator(z)
+            print(f"Generator test passed. Output shape: {samples.shape}")
+            
+            # Test discriminator
+            fake_data = torch.randn(4, model.config.input_dim, device=model.device)
+            with torch.no_grad():
+                pred = model.discriminator(fake_data)
+            print(f"Discriminator test passed. Output shape: {pred.shape}")
+            
+        except Exception as e:
+            print(f"Model test failed: {e}")
+            traceback.print_exc()
+        
+        # Update master config with build information
+        model_info = model.get_model_info()
+        gan_config['model'].update({
+            'model_built': True,
+            'model_class': 'VanillaGAN',
+            'architecture': 'fully_connected',
+            'latent_dim': model.config.latent_dim,
+            'input_dim': model.config.input_dim,
+            'generator_layers': model.config.generator_layers,
+            'discriminator_layers': model.config.discriminator_layers,
+            'training_algorithm': algorithm,
+            'discriminator_type': model_info['discriminator_type'],
+            'use_forward_forward': use_forward_forward,
+            'use_cafo': use_cafo,
+            'generator_params': sum(p.numel() for p in model.generator.parameters()),
+            'discriminator_params': sum(p.numel() for p in model.discriminator.parameters()),
+            'built_timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'device': str(model.device)
+        })
+        
+        gan_config['metadata'].update({
+            'built_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'build_step': 'completed',
+            'model_created': True,
+            'model_type': 'vanilla_gan',
+            'architecture_type': 'fully_connected'
+        })
+        
+        # Create detailed model info
+        model_info_data = {
+            'model_type': 'vanilla_gan',
+            'model_name': args.model_name,
+            'build_status': 'success',
+            'model_class': 'VanillaGAN',
+            'architecture': 'fully_connected',
+            'latent_dim': model.config.latent_dim,
+            'input_dim': model.config.input_dim,
+            'generator_layers': model.config.generator_layers,
+            'discriminator_layers': model.config.discriminator_layers,
+            'training_algorithm': algorithm,
+            'discriminator_type': model_info['discriminator_type'],
+            'algorithm_config': {
+                'use_forward_forward': use_forward_forward,
+                'use_cafo': use_cafo,
+                'ff_theta': vanilla_config_dict.get('ff_theta', 2.0),
+                'ff_positive_margin': vanilla_config_dict.get('ff_positive_margin', 2.0),
+                'ff_negative_margin': vanilla_config_dict.get('ff_negative_margin', 0.0),
+                'ff_blocks': vanilla_config_dict.get('ff_blocks', 3),
+                'cafo_blocks': vanilla_config_dict.get('cafo_blocks', 3)
+            },
+            'total_parameters': {
+                'generator': sum(p.numel() for p in model.generator.parameters()),
+                'discriminator': sum(p.numel() for p in model.discriminator.parameters()),
+                'total': sum(p.numel() for p in model.generator.parameters()) + sum(p.numel() for p in model.discriminator.parameters())
+            },
+            'config': vanilla_config_dict,
+            'pytorch_version': torch.__version__,
+            'cuda_available': torch.cuda.is_available(),
+            'device': str(model.device),
+            'build_timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'data_format': 'flattened_vectors'
+        }
+        
+        # Encode updated config to base64
+        updated_config_json = json.dumps(gan_config, indent=2)
+        updated_config_base64 = base64.b64encode(updated_config_json.encode('utf-8')).decode('utf-8')
+        
+        # Save outputs with better error handling
+        print("Saving model outputs...")
+        
+        # Save model
+        os.makedirs(os.path.dirname(args.model_out) or '.', exist_ok=True)
+        try:
+            # Create a simplified model wrapper for reliable pickling
+            class VanillaGANWrapper:
+                def __init__(self, model_obj):
+                    self.model_type = 'vanilla_gan'
+                    self.config = model_obj.config.__dict__
+                    self.generator_state = model_obj.generator.state_dict()
+                    self.discriminator_state = model_obj.discriminator.state_dict()
+                    self.generator_arch = model_obj.generator
+                    self.discriminator_arch = model_obj.discriminator
+                    self.device = str(model_obj.device)
+                    self.model_info = model_obj.get_model_info()
+            
+            wrapper = VanillaGANWrapper(model)
+            with open(args.model_out, 'wb') as f:
+                pickle.dump(wrapper, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"Model saved successfully: {args.model_out}")
+            
+        except Exception as e:
+            print(f"Failed to save full model, saving state dict: {e}")
+            # Fallback: save only state dicts and config
+            model_state = {
+                'model_type': 'vanilla_gan',
+                'config': vanilla_config_dict,
+                'generator_state_dict': model.generator.state_dict(),
+                'discriminator_state_dict': model.discriminator.state_dict(),
+                'model_info': model.get_model_info()
+            }
+            with open(args.model_out, 'wb') as f:
+                pickle.dump(model_state, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"Model state saved: {args.model_out}")
+        
+        # Save updated config
+        os.makedirs(os.path.dirname(args.gan_config_base64_updated) or '.', exist_ok=True)
+        with open(args.gan_config_base64_updated, 'w') as f:
+            f.write(updated_config_base64)
+        
+        # Save model info
+        os.makedirs(os.path.dirname(args.model_info) or '.', exist_ok=True)
+        with open(args.model_info, 'w') as f:
+            json.dump(model_info_data, f, indent=2)
+        
+        print("="*60)
+        print("Vanilla GAN Build completed successfully")
+        print(f"Algorithm: {algorithm.upper()}")
+        print(f"Discriminator Type: {model_info['discriminator_type']}")
+        print(f"Forward-Forward: {use_forward_forward}")
+        print(f"CAFO: {use_cafo}")
+        print(f"Model saved: {args.model_out}")
+        print(f"Config (base64) saved: {args.gan_config_base64_updated}")
+        print(f"Model info saved: {args.model_info}")
+        print(f"Generator parameters: {sum(p.numel() for p in model.generator.parameters()):,}")
+        print(f"Discriminator parameters: {sum(p.numel() for p in model.discriminator.parameters()):,}")
+        print(f"Device: {model.device}")
+        print("="*60)
+
+    args:
+      - --gan_config_json
+      - {inputValue: gan_config_json}
+      - --model_name
+      - {inputValue: model_name}
+      - --model_out
+      - {outputPath: model_out}
+      - --gan_config_base64_updated
+      - {outputPath: gan_config_base64_updated}
+      - --model_info
+      - {outputPath: model_info}
