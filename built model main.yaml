@@ -250,28 +250,17 @@ implementation:
         # Save outputs with better error handling
         print("Saving model outputs...")
         
-        # Save model
+        # Save model directly (VanillaGAN object from vanilla_gan.py)
         os.makedirs(os.path.dirname(args.model_out) or '.', exist_ok=True)
         try:
-            # Create a simplified model wrapper for reliable pickling
-            class VanillaGANWrapper:
-                def __init__(self, model_obj):
-                    self.model_type = 'vanilla_gan'
-                    self.config = model_obj.config.__dict__
-                    self.generator_state = model_obj.generator.state_dict()
-                    self.discriminator_state = model_obj.discriminator.state_dict()
-                    self.generator_arch = model_obj.generator
-                    self.discriminator_arch = model_obj.discriminator
-                    self.device = str(model_obj.device)
-                    self.model_info = model_obj.get_model_info()
-            
-            wrapper = VanillaGANWrapper(model)
+            # Save the VanillaGAN object directly - it's already from vanilla_gan.py
             with open(args.model_out, 'wb') as f:
-                pickle.dump(wrapper, f, protocol=pickle.HIGHEST_PROTOCOL)
+                pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
             print(f"Model saved successfully: {args.model_out}")
             
         except Exception as e:
-            print(f"Failed to save full model, saving state dict: {e}")
+            print(f"Failed to save model object, saving state dict: {e}")
+            traceback.print_exc()
             # Fallback: save only state dicts and config
             model_state = {
                 'model_type': 'vanilla_gan',
