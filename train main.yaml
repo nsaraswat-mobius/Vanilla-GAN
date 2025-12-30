@@ -271,16 +271,18 @@ implementation:
                     'discriminator_lr': discriminator_lr
                 })
                 
-                generator = VanillaGenerator(
-                    config.get('latent_dim', 100),
-                    config.get('input_dim', 784),
-                    config.get('generator_layers', [256, 512, 1024])
+                # Create config object for the models
+                model_cfg = VanillaGANConfig(
+                    input_dim=config.get('input_dim', 784),
+                    latent_dim=config.get('latent_dim', 100),
+                    generator_layers=config.get('generator_layers', [256, 512, 1024]),
+                    discriminator_layers=config.get('discriminator_layers', [1024, 512, 256]),
+                    discriminator_dropout=d_dropout,
+                    device='cpu'
                 )
-                discriminator = VanillaDiscriminator(
-                    config.get('input_dim', 784),
-                    config.get('discriminator_layers', [1024, 512, 256]),
-                    d_dropout
-                )
+                
+                generator = VanillaGenerator(model_cfg)
+                discriminator = VanillaDiscriminator(model_cfg)
                 
                 # Load state dicts
                 generator.load_state_dict(model_data.generator_state)
@@ -309,28 +311,25 @@ implementation:
             
             # Create a balanced fallback model
             try:
-                fallback_config = {
-                    'latent_dim': model_config.get('latent_dim', 100),
-                    'input_dim': input_dim,
-                    'generator_layers': model_config.get('generator_layers', [256, 512, 1024]),
-                    'discriminator_layers': model_config.get('discriminator_layers', [1024, 512, 256]),
+                fallback_config = VanillaGANConfig(
+                    input_dim=input_dim,
+                    latent_dim=model_config.get('latent_dim', 100),
+                    generator_layers=model_config.get('generator_layers', [256, 512, 1024]),
+                    discriminator_layers=model_config.get('discriminator_layers', [1024, 512, 256]),
+                    discriminator_dropout=d_dropout,
+                    device='cpu'
+                )
+                
+                generator = VanillaGenerator(fallback_config)
+                discriminator = VanillaDiscriminator(fallback_config)
+                
+                balanced_config = {
                     'generator_lr': generator_lr,
                     'discriminator_lr': discriminator_lr,
                     'device': 'cpu'
                 }
                 
-                generator = VanillaGenerator(
-                    fallback_config['latent_dim'],
-                    fallback_config['input_dim'],
-                    fallback_config['generator_layers']
-                )
-                discriminator = VanillaDiscriminator(
-                    fallback_config['input_dim'],
-                    fallback_config['discriminator_layers'],
-                    d_dropout
-                )
-                
-                gan = BalancedVanillaGAN(generator, discriminator, fallback_config)
+                gan = BalancedVanillaGAN(generator, discriminator, balanced_config)
                 print("Created balanced fallback model successfully")
                 
             except Exception as fallback_error:
