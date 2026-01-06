@@ -1,4 +1,4 @@
-name: Evaluate Vanilla GAN
+name: Evaluate Vanilla GAN 1
 description: Evaluates Vanilla GAN model using master config with fully connected architecture metrics
 inputs:
   - name: trained_model
@@ -60,7 +60,7 @@ implementation:
                 VanillaGAN,
                 VanillaGANConfig
             )
-            print("✓ Successfully imported all Vanilla GAN classes from nesy_factory")
+            print("Successfully imported all Vanilla GAN classes from nesy_factory")
         except ImportError as e:
             print(f"Failed to import from nesy_factory: {e}")
             traceback.print_exc()
@@ -308,7 +308,7 @@ implementation:
         
         # If model still not loaded, create fallback
         if not model_loaded or generator is None:
-            print("\nCreating fallback model for evaluation...")
+            print("Creating fallback model for evaluation...")
             
             # Create fallback config
             model_cfg = VanillaGANConfig(
@@ -323,9 +323,9 @@ implementation:
             discriminator = VanillaDiscriminator(model_cfg)
             
             gan = SimpleVanillaGAN(generator, discriminator, {})
-            print("  USING FALLBACK MODEL - Results may not reflect actual training!")
+            print("USING FALLBACK MODEL - Results may not reflect actual training!")
         else:
-            print("✓ Model loaded successfully for evaluation")
+            print("Model loaded successfully for evaluation")
         
         # Load test data
         try:
@@ -405,7 +405,7 @@ implementation:
                         'filename': f'vanilla_gan_{algorithm}_eval_{i}.png'
                     })
             
-            print(f"✓ Generated {len(evaluation_samples)} evaluation samples")
+            print(f"Generated {len(evaluation_samples)} evaluation samples")
             
         except Exception as e:
             print(f"Error generating evaluation samples: {e}")
@@ -605,7 +605,7 @@ implementation:
         '''
         
         # Save all outputs
-        print("\nSaving evaluation results...")
+        print("Saving evaluation results...")
         
         # Save evaluation metrics
         os.makedirs(os.path.dirname(args.eval_metrics), exist_ok=True)
