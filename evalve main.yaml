@@ -278,7 +278,7 @@ implementation:
                 
                 else:
                     # Check if it's a minimal model state
-                    print("Model appears to be minimal state, creating fallback...")
+                    print("Model appears to be minimal state, creating fallback")
                     raise ValueError("Invalid model format")
             
             else:
@@ -288,7 +288,7 @@ implementation:
             print(f"Error loading model: {e}")
             traceback.print_exc()
             
-            print("Attempting to extract generator and discriminator directly...")
+            print("Attempting to extract generator and discriminator directly")
             try:
                 # Try to load the pickle file and extract components
                 with open(args.trained_model, 'rb') as f:
@@ -308,7 +308,7 @@ implementation:
         
         # If model still not loaded, create fallback
         if not model_loaded or generator is None:
-            print("Creating fallback model for evaluation...")
+            print("Creating fallback model for evaluation")
             
             # Create fallback config
             model_cfg = VanillaGANConfig(
@@ -323,7 +323,7 @@ implementation:
             discriminator = VanillaDiscriminator(model_cfg)
             
             gan = SimpleVanillaGAN(generator, discriminator, {})
-            print("USING FALLBACK MODEL - Results may not reflect actual training!")
+            print("USING FALLBACK MODEL - Results may not reflect actual training")
         else:
             print("Model loaded successfully for evaluation")
         
@@ -365,7 +365,7 @@ implementation:
         
         try:
             num_samples = eval_config.get('num_samples', 16)
-            print(f"Generating {num_samples} evaluation samples...")
+            print(f"Generating {num_samples} evaluation samples")
             
             with torch.no_grad():
                 for i in range(num_samples):
