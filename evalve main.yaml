@@ -66,8 +66,92 @@ implementation:
             traceback.print_exc()
             sys.exit(1)
         
-        # All model classes are imported from vanilla_gan.py
-        # No need to redefine them here
+        # Define the same BalancedVanillaGAN class used in training
+        class BalancedVanillaGAN:
+            def __init__(self, generator, discriminator, config):
+                self.generator = generator
+                self.discriminator = discriminator
+                self.config = config
+                self.device = torch.device(config.get('device', 'cpu'))
+                
+                # SEPARATE OPTIMIZERS WITH DIFFERENT LEARNING RATES
+                g_lr = config.get('generator_lr', 0.0002)
+                d_lr = config.get('discriminator_lr', 0.0001)
+                
+                self.g_optimizer = torch.optim.Adam(generator.parameters(), lr=g_lr, betas=(0.5, 0.999))
+                self.d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=d_lr, betas=(0.5, 0.999))
+                self.criterion = nn.BCELoss()
+                self.mse_loss = nn.MSELoss()
+            
+            def compute_gradient_penalty(self, real_samples, fake_samples, lambda_gp=10):
+                batch_size = real_samples.size(0)
+                alpha = torch.rand(batch_size, 1, device=self.device)
+                alpha = alpha.expand_as(real_samples)
+                
+                interpolates = alpha * real_samples + (1 - alpha) * fake_samples
+                interpolates.requires_grad_(True)
+                
+                d_interpolates = self.discriminator(interpolates)
+                
+                gradients = torch.autograd.grad(
+                    outputs=d_interpolates,
+                    inputs=interpolates,
+                    grad_outputs=torch.ones_like(d_interpolates),
+                    create_graph=True,
+                    retain_graph=True
+                )[0]
+                
+                gradient_penalty = lambda_gp * ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+                return gradient_penalty
+            
+            def feature_matching_loss(self, real_data, fake_data):
+                # Get intermediate features from discriminator
+                real_features = []
+                fake_features = []
+                
+                # Forward through discriminator layers and collect features
+                x_real = real_data
+                x_fake = fake_data
+                
+                # Check discriminator structure
+                if hasattr(self.discriminator, 'model'):
+                    # Old structure with .model attribute
+                    layers = self.discriminator.model
+                elif hasattr(self.discriminator, 'layers'):
+                    # New structure with .layers attribute
+                    layers = self.discriminator.layers
+                elif hasattr(self.discriminator, 'blocks'):
+                    # Forward-Forward or CAFO structure
+                    layers = self.discriminator.blocks
+                else:
+                    # Try to get the layers directly
+                    layers = list(self.discriminator.children())
+                
+                # Collect features from intermediate layers (skip final layer)
+                for i, layer in enumerate(layers[:-1]):  # Skip final sigmoid/linear
+                    x_real = layer(x_real)
+                    x_fake = layer(x_fake)
+                    
+                    if hasattr(layer, 'out_features') or hasattr(layer, 'out_channels'):
+                        # It's a linear or conv layer, collect features
+                        real_features.append(x_real.detach())
+                        fake_features.append(x_fake)
+                
+                # Compute MSE loss between real and fake features
+                fm_loss = 0
+                if real_features and fake_features:
+                    for real_feat, fake_feat in zip(real_features, fake_features):
+                        fm_loss += self.mse_loss(fake_feat.mean(0), real_feat.mean(0))
+                    return fm_loss / len(real_features)
+                else:
+                    return torch.tensor(0.0, device=self.device)
+        
+        # Simple wrapper class for evaluation
+        class SimpleVanillaGAN:
+            def __init__(self, generator, discriminator, config):
+                self.generator = generator
+                self.discriminator = discriminator
+                self.config = config
         
         # =============================================================================
         # MAIN VANILLA GAN EVALUATION LOGIC
@@ -113,6 +197,10 @@ implementation:
         
         # Load trained model with robust handling
         gan = None
+        generator = None
+        discriminator = None
+        model_loaded = False
+        
         try:
             print("Loading trained model...")
             with open(args.trained_model, 'rb') as f:
@@ -120,82 +208,77 @@ implementation:
             
             print(f"Model data loaded: {type(model_data)}")
             
+            # Check file size
+            file_size = os.path.getsize(args.trained_model)
+            print(f"Model file size: {file_size} bytes")
+            
             # Handle different model formats
             if hasattr(model_data, 'generator') and hasattr(model_data, 'discriminator'):
-                # Direct model object (could be SimpleVanillaGAN or BalancedVanillaGAN)
+                # Direct model object (could be BalancedVanillaGAN or SimpleVanillaGAN)
                 print(f"Loading direct model: {type(model_data)}")
-                
-                # Check if it's a balanced GAN
-                if hasattr(model_data, '__class__') and 'Balanced' in str(model_data.__class__):
-                    # It's already a BalancedVanillaGAN, use as-is
-                    gan = model_data
-                    print("Loaded BalancedVanillaGAN directly")
-                else:
-                    # Use as-is (SimpleVanillaGAN or compatible)
-                    gan = model_data
-                    print("Loaded VanillaGAN model directly")
+                gan = model_data
+                generator = model_data.generator
+                discriminator = model_data.discriminator
+                model_loaded = True
+                print(f"Successfully loaded model with generator: {type(generator)}, discriminator: {type(discriminator)}")
             
-            elif hasattr(model_data, 'generator_state') and hasattr(model_data, 'discriminator_state'):
-                # Model wrapper with state dicts (from balanced training)
-                print("Reconstructing from model wrapper...")
-                config = model_data.config
+            elif hasattr(model_data, 'generator_state_dict') and hasattr(model_data, 'discriminator_state_dict'):
+                # State dict format
+                print("Loading from state dict format...")
+                config = model_data.get('config', {})
                 
-                generator = VanillaGenerator(
-                    config.get('latent_dim', 100),
-                    config.get('input_dim', 784),
-                    config.get('generator_layers', [256, 512, 1024])
-                )
-                discriminator = VanillaDiscriminator(
-                    config.get('input_dim', 784),
-                    config.get('discriminator_layers', [1024, 512, 256])
+                # Create generator and discriminator using VanillaGANConfig
+                model_cfg = VanillaGANConfig(
+                    input_dim=input_dim,
+                    latent_dim=latent_dim,
+                    generator_layers=model_config.get('generator_layers', [256, 512, 1024]),
+                    discriminator_layers=model_config.get('discriminator_layers', [1024, 512, 256]),
+                    device='cpu'
                 )
                 
-                generator.load_state_dict(model_data.generator_state)
-                discriminator.load_state_dict(model_data.discriminator_state)
+                generator = VanillaGenerator(model_cfg)
+                discriminator = VanillaDiscriminator(model_cfg)
                 
-                # Create appropriate wrapper for evaluation
-                if config.get('generator_lr') or config.get('training_type') == 'balanced':
-                    gan = BalancedVanillaGAN(generator, discriminator, config)
-                    print("Successfully reconstructed BalancedVanillaGAN")
-                else:
-                    gan = SimpleVanillaGAN(generator, discriminator, config)
-                    print("Successfully reconstructed SimpleVanillaGAN")
-            
-            elif hasattr(model_data, 'generator_arch') and hasattr(model_data, 'discriminator_arch'):
-                # Architecture-based wrapper
-                print("Extracting from architecture wrapper...")
-                gan = SimpleVanillaGAN(
-                    model_data.generator_arch, 
-                    model_data.discriminator_arch, 
-                    model_data.config
-                )
-                print("Successfully extracted model")
+                generator.load_state_dict(model_data['generator_state_dict'])
+                discriminator.load_state_dict(model_data['discriminator_state_dict'])
+                
+                gan = SimpleVanillaGAN(generator, discriminator, config)
+                model_loaded = True
+                print("Successfully loaded from state dict")
             
             elif isinstance(model_data, dict):
-                if 'generator_state_dict' in model_data:
-                    # State dict format
-                    print("Reconstructing from state dict...")
+                # Try various dict formats
+                if 'generator_state_dict' in model_data or 'generator_state' in model_data:
+                    print("Loading from dictionary with state dicts...")
                     config = model_data.get('config', {})
                     
-                    generator = VanillaGenerator(
-                        config.get('latent_dim', 100),
-                        config.get('input_dim', 784),
-                        config.get('generator_layers', [256, 512, 1024])
-                    )
-                    discriminator = VanillaDiscriminator(
-                        config.get('input_dim', 784),
-                        config.get('discriminator_layers', [1024, 512, 256])
+                    # Create generator and discriminator using VanillaGANConfig
+                    model_cfg = VanillaGANConfig(
+                        input_dim=input_dim,
+                        latent_dim=latent_dim,
+                        generator_layers=model_config.get('generator_layers', [256, 512, 1024]),
+                        discriminator_layers=model_config.get('discriminator_layers', [1024, 512, 256]),
+                        device='cpu'
                     )
                     
-                    generator.load_state_dict(model_data['generator_state_dict'])
-                    discriminator.load_state_dict(model_data['discriminator_state_dict'])
+                    generator = VanillaGenerator(model_cfg)
+                    discriminator = VanillaDiscriminator(model_cfg)
+                    
+                    # Try different state dict keys
+                    if 'generator_state_dict' in model_data:
+                        generator.load_state_dict(model_data['generator_state_dict'])
+                        discriminator.load_state_dict(model_data['discriminator_state_dict'])
+                    elif 'generator_state' in model_data:
+                        generator.load_state_dict(model_data['generator_state'])
+                        discriminator.load_state_dict(model_data['discriminator_state'])
                     
                     gan = SimpleVanillaGAN(generator, discriminator, config)
-                    print("Successfully reconstructed from state dict")
-                    
+                    model_loaded = True
+                    print("Successfully loaded from dictionary format")
+                
                 else:
-                    # Training state or other format
-                    print("Model appears to be training state, creating fallback...")
+                    # Check if it's a minimal model state
+                    print("Model appears to be minimal state, creating fallback...")
                     raise ValueError("Invalid model format")
             
             else:
@@ -203,44 +286,46 @@ implementation:
                 
         except Exception as e:
             print(f"Error loading model: {e}")
-            import traceback
             traceback.print_exc()
             
-            # Try to extract model information from error for better recovery
-            print("Attempting recovery from model loading error...")
+            print("Attempting to extract generator and discriminator directly...")
+            try:
+                # Try to load the pickle file and extract components
+                with open(args.trained_model, 'rb') as f:
+                    loaded_obj = pickle.load(f)
+                
+                # Check if we can extract generator and discriminator
+                if hasattr(loaded_obj, 'generator'):
+                    generator = loaded_obj.generator
+                    discriminator = loaded_obj.discriminator if hasattr(loaded_obj, 'discriminator') else None
+                    gan = SimpleVanillaGAN(generator, discriminator, {})
+                    model_loaded = True
+                    print("Successfully extracted generator and discriminator directly")
+                else:
+                    print("Could not extract components directly")
+            except Exception as extract_error:
+                print(f"Failed to extract components: {extract_error}")
+        
+        # If model still not loaded, create fallback
+        if not model_loaded or generator is None:
+            print("\nCreating fallback model for evaluation...")
             
-            # Check if the model file exists and has content
-            import os
-            if os.path.exists(args.trained_model) and os.path.getsize(args.trained_model) > 0:
-                print(f"Model file exists and has content ({os.path.getsize(args.trained_model)} bytes)")
-                print("The model format may not be compatible with evaluation.")
-                print("This often happens when a model is saved during training.")
-                print("Using minimal fallback for emergency evaluation...")
-            else:
-                print("Model file is missing or empty.")
-                print("Creating fallback model for evaluation...")
-            
-            # Create fallback model
-            fallback_config = {
-                'latent_dim': latent_dim,
-                'input_dim': input_dim,
-                'generator_layers': model_config.get('generator_layers', [256, 512, 1024]),
-                'discriminator_layers': model_config.get('discriminator_layers', [1024, 512, 256]),
-                'device': 'cpu'
-            }
-            
-            generator = VanillaGenerator(
-                fallback_config['latent_dim'],
-                fallback_config['input_dim'],
-                fallback_config['generator_layers']
-            )
-            discriminator = VanillaDiscriminator(
-                fallback_config['input_dim'],
-                fallback_config['discriminator_layers']
+            # Create fallback config
+            model_cfg = VanillaGANConfig(
+                input_dim=input_dim,
+                latent_dim=latent_dim,
+                generator_layers=model_config.get('generator_layers', [256, 512, 1024]),
+                discriminator_layers=model_config.get('discriminator_layers', [1024, 512, 256]),
+                device='cpu'
             )
             
-            gan = SimpleVanillaGAN(generator, discriminator, fallback_config)
+            generator = VanillaGenerator(model_cfg)
+            discriminator = VanillaDiscriminator(model_cfg)
+            
+            gan = SimpleVanillaGAN(generator, discriminator, {})
             print("  USING FALLBACK MODEL - Results may not reflect actual training!")
+        else:
+            print("✓ Model loaded successfully for evaluation")
         
         # Load test data
         try:
@@ -264,12 +349,13 @@ implementation:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {device}")
         
-        if hasattr(gan, 'generator'):
-            gan.generator.to(device)
-            gan.generator.eval()
-        if hasattr(gan, 'discriminator'):
-            gan.discriminator.to(device)
-            gan.discriminator.eval()
+        # Move model to device and set to eval mode
+        generator.to(device)
+        generator.eval()
+        
+        if discriminator:
+            discriminator.to(device)
+            discriminator.eval()
         
         algorithm = model_config.get('training_algorithm', 'backprop')
         print(f"Evaluating VANILLA_GAN trained with {algorithm.upper()}")
@@ -287,14 +373,7 @@ implementation:
                     noise = torch.randn(1, latent_dim, device=device)
                     
                     # Generate flattened sample
-                    if hasattr(gan, 'generator'):
-                        try:
-                            fake_flat = gan.generator(noise).cpu()
-                        except Exception as gen_error:
-                            print(f"Generator error: {gen_error}")
-                            fake_flat = torch.randn(1, input_dim) * 0.5
-                    else:
-                        fake_flat = torch.randn(1, input_dim) * 0.5
+                    fake_flat = generator(noise).cpu()
                     
                     # Reshape to image dimensions
                     fake_img = fake_flat.view(1, channels, image_size, image_size)
@@ -326,11 +405,10 @@ implementation:
                         'filename': f'vanilla_gan_{algorithm}_eval_{i}.png'
                     })
             
-            print(f"Generated {len(evaluation_samples)} evaluation samples")
+            print(f"✓ Generated {len(evaluation_samples)} evaluation samples")
             
         except Exception as e:
             print(f"Error generating evaluation samples: {e}")
-            import traceback
             traceback.print_exc()
             # Create placeholder samples
             for i in range(min(4, eval_config.get('num_samples', 16))):
@@ -352,7 +430,6 @@ implementation:
         avg_d_loss = np.mean(training_history.get('losses_d', [1.0])) if training_history.get('losses_d') else 1.0
         
         # Calculate Vanilla GAN specific metrics
-        # For Vanilla GAN, simpler metrics based on loss convergence
         reconstruction_quality = max(0.0, 1.0 - final_g_loss)  # How well generator learned
         discriminator_stability = 1.0 / (1.0 + abs(final_d_loss - 0.693))  # How close to optimal 0.693 (ln(2))
         
@@ -426,7 +503,8 @@ implementation:
                 'diversity_score': round(diversity_score, 3),
                 'convergence_score': round(convergence_score, 3)
             },
-            'evaluation_time_seconds': round(eval_time, 2)
+            'evaluation_time_seconds': round(eval_time, 2),
+            'model_load_status': 'success' if model_loaded else 'fallback_used'
         }
         
         # Determine quality assessment
@@ -452,6 +530,7 @@ implementation:
         Model Type: Vanilla GAN (Fully Connected)
         Training Algorithm: {algorithm.upper()}
         Architecture: Generator + Discriminator (Linear Layers)
+        Model Load Status: {"Success" if model_loaded else "Fallback Used"}
         Evaluation Time: {eval_metrics_data['evaluation_time']}
         Evaluation Duration: {eval_metrics_data['evaluation_time_seconds']:.2f} seconds
         
@@ -526,7 +605,7 @@ implementation:
         '''
         
         # Save all outputs
-        print("\\nSaving evaluation results...")
+        print("\nSaving evaluation results...")
         
         # Save evaluation metrics
         os.makedirs(os.path.dirname(args.eval_metrics), exist_ok=True)
