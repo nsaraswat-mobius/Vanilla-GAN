@@ -513,7 +513,7 @@ implementation:
                 print("Warning: CAFO discriminator doesn't have blocks")
         
         # =============================================================================
-        # BALANCED VANILLA GAN TRAINING LOOP (ALL ALGORITHMS)
+        # BALANCED VANILLA GAN TRAINING LOOP (ALL ALGORITHMS) - FIXED VERSION
         # =============================================================================
         
         print(f"Starting main {algorithm.upper()} training loop...")
@@ -528,13 +528,14 @@ implementation:
                 current_batch_size = real_data.size(0)
                 real_data = real_data.to(device)
                 
+                # FIX: Create labels with correct shape [batch_size] not [batch_size, 1]
                 # LABEL SMOOTHING
                 if label_smoothing > 0:
-                    real_labels = torch.ones(current_batch_size, 1, device=device) - label_smoothing
-                    fake_labels = torch.zeros(current_batch_size, 1, device=device) + label_smoothing
+                    real_labels = torch.ones(current_batch_size, device=device) - label_smoothing
+                    fake_labels = torch.zeros(current_batch_size, device=device) + label_smoothing
                 else:
-                    real_labels = torch.ones(current_batch_size, 1, device=device)
-                    fake_labels = torch.zeros(current_batch_size, 1, device=device)
+                    real_labels = torch.ones(current_batch_size, device=device)
+                    fake_labels = torch.zeros(current_batch_size, device=device)
                 
                 # ADD NOISE TO DISCRIMINATOR INPUT (optional)
                 if noise_std > 0:
@@ -557,6 +558,11 @@ implementation:
                         d_steps_to_run = 0  # Skip discriminator training
                         print(f"Skipping D training - too strong (Real: {recent_real_score:.3f}, Fake: {recent_fake_score:.3f})")
                 
+                # Initialize variables for this batch
+                d_loss = None
+                fake_data = None
+                fake_data_noisy = None
+                
                 for d_step in range(d_steps_to_run):
                     gan.d_optimizer.zero_grad()
                     
@@ -565,6 +571,7 @@ implementation:
                         # Forward-Forward discriminator training (after block training)
                         try:
                             real_pred, real_layer_outputs = gan.discriminator(real_data_noisy, return_layers=True)
+                            real_pred = real_pred.view(-1)  # FIX: Ensure shape [batch_size]
                             
                             # Generate fake data
                             noise = torch.randn(current_batch_size, latent_dim, device=device)
@@ -576,6 +583,7 @@ implementation:
                                 fake_data_noisy = fake_data
                             
                             fake_pred, fake_layer_outputs = gan.discriminator(fake_data_noisy, return_layers=True)
+                            fake_pred = fake_pred.view(-1)  # FIX: Ensure shape [batch_size]
                             
                             # Standard GAN loss for final layer
                             real_loss = gan.criterion(real_pred, real_labels)
@@ -585,7 +593,7 @@ implementation:
                         except Exception as ff_error:
                             print(f"FF discriminator training error, using standard: {ff_error}")
                             # Fallback to standard training
-                            real_output = gan.discriminator(real_data_noisy)
+                            real_output = gan.discriminator(real_data_noisy).view(-1)  # FIX
                             d_loss_real = gan.criterion(real_output, real_labels)
                             
                             noise = torch.randn(current_batch_size, latent_dim, device=device)
@@ -596,13 +604,13 @@ implementation:
                             else:
                                 fake_data_noisy = fake_data
                             
-                            fake_output = gan.discriminator(fake_data_noisy)
+                            fake_output = gan.discriminator(fake_data_noisy).view(-1)  # FIX
                             d_loss_fake = gan.criterion(fake_output, fake_labels)
                             d_loss = (d_loss_real + d_loss_fake) / 2
                     
                     elif algorithm == 'cafo' and hasattr(gan.discriminator, 'cafo_trained') and gan.discriminator.cafo_trained:
                         # CAFO discriminator training (after block training)
-                        real_output = gan.discriminator(real_data_noisy)
+                        real_output = gan.discriminator(real_data_noisy).view(-1)  # FIX
                         d_loss_real = gan.criterion(real_output, real_labels)
                         
                         noise = torch.randn(current_batch_size, latent_dim, device=device)
@@ -613,13 +621,13 @@ implementation:
                         else:
                             fake_data_noisy = fake_data
                         
-                        fake_output = gan.discriminator(fake_data_noisy)
+                        fake_output = gan.discriminator(fake_data_noisy).view(-1)  # FIX
                         d_loss_fake = gan.criterion(fake_output, fake_labels)
                         d_loss = (d_loss_real + d_loss_fake) / 2
                     
                     else:
                         # Standard backprop discriminator training
-                        real_output = gan.discriminator(real_data_noisy)
+                        real_output = gan.discriminator(real_data_noisy).view(-1)  # FIX: Ensure shape [batch_size]
                         d_loss_real = gan.criterion(real_output, real_labels)
                         
                         noise = torch.randn(current_batch_size, latent_dim, device=device)
@@ -632,19 +640,22 @@ implementation:
                         else:
                             fake_data_noisy = fake_data
                         
-                        fake_output = gan.discriminator(fake_data_noisy)
+                        fake_output = gan.discriminator(fake_data_noisy).view(-1)  # FIX: Ensure shape [batch_size]
                         d_loss_fake = gan.criterion(fake_output, fake_labels)
                         
                         # Total discriminator loss
                         d_loss = (d_loss_real + d_loss_fake) / 2
                     
                     # Add gradient penalty if enabled
-                    if gradient_penalty > 0:
+                    if gradient_penalty > 0 and fake_data_noisy is not None:
                         gp = gan.compute_gradient_penalty(real_data_noisy, fake_data_noisy, gradient_penalty)
                         d_loss += gp
                     
-                    d_loss.backward()
-                    gan.d_optimizer.step()
+                    if d_loss is not None:
+                        d_loss.backward()
+                        gan.d_optimizer.step()
+                    else:
+                        print("Warning: d_loss is None, skipping discriminator update")
                 
                 # =============
                 # Train Generator (g_train_steps times)
@@ -659,43 +670,61 @@ implementation:
                         g_steps_to_run = g_train_steps * 3  # Triple generator training
                         print(f"Boosting G training - D too strong (Real: {recent_real_score:.3f}, Fake: {recent_fake_score:.3f})")
                 
+                g_loss = None
+                fake_data_for_generator = None
+                
                 for g_step in range(g_steps_to_run):
                     gan.g_optimizer.zero_grad()
                     
                     # Generate fake data (don't detach this time)
                     noise = torch.randn(current_batch_size, latent_dim, device=device)
-                    fake_data = gan.generator(noise)
-                    fake_output = gan.discriminator(fake_data)
+                    fake_data_for_generator = gan.generator(noise)
+                    fake_output = gan.discriminator(fake_data_for_generator).view(-1)  # FIX: Ensure shape [batch_size]
                     
                     # Standard generator loss (wants discriminator to think fake data is real)
                     if label_smoothing > 0:
-                        target_labels = torch.ones(current_batch_size, 1, device=device) - label_smoothing/2
+                        target_labels = torch.ones(current_batch_size, device=device) - label_smoothing/2
                     else:
-                        target_labels = torch.ones(current_batch_size, 1, device=device)
+                        target_labels = torch.ones(current_batch_size, device=device)
                     
                     g_loss_adversarial = gan.criterion(fake_output, target_labels)
                     
                     # Add feature matching loss if enabled
                     g_loss = g_loss_adversarial
                     if feature_matching:
-                        fm_loss = gan.feature_matching_loss(real_data, fake_data)
+                        fm_loss = gan.feature_matching_loss(real_data, fake_data_for_generator)
                         g_loss += 10.0 * fm_loss  # Weight feature matching loss
                     
                     g_loss.backward()
                     gan.g_optimizer.step()
                 
                 # Record batch statistics
-                epoch_g_losses.append(g_loss.item())
-                epoch_d_losses.append(d_loss.item())
-                epoch_real_scores.append(real_output.mean().item())
-                epoch_fake_scores.append(fake_output.mean().item())
+                # Use the latest fake data for scoring
+                current_fake_data = fake_data if fake_data is not None else fake_data_for_generator
                 
-                # Print progress occasionally
-                if batch_idx % 50 == 0:
-                    print(f"Epoch [{epoch+1}/{epochs}] Batch [{batch_idx}/{len(dataloader)}] "
-                          f"G Loss: {g_loss.item():.4f} D Loss: {d_loss.item():.4f} "
-                          f"Real Score: {real_output.mean().item():.3f} "
-                          f"Fake Score: {fake_output.mean().item():.3f}")
+                if current_fake_data is not None and g_loss is not None and d_loss is not None:
+                    epoch_g_losses.append(g_loss.item())
+                    epoch_d_losses.append(d_loss.item())
+                    
+                    # Calculate scores
+                    real_output_for_score = gan.discriminator(real_data).view(-1).mean().item()  # FIX
+                    fake_output_for_score = gan.discriminator(current_fake_data.detach()).view(-1).mean().item()  # FIX
+                    epoch_real_scores.append(real_output_for_score)
+                    epoch_fake_scores.append(fake_output_for_score)
+                    
+                    # Print progress occasionally
+                    if batch_idx % 50 == 0:
+                        print(f"Epoch [{epoch+1}/{epochs}] Batch [{batch_idx}/{len(dataloader)}] "
+                              f"G Loss: {g_loss.item():.4f} D Loss: {d_loss.item():.4f} "
+                              f"Real Score: {real_output_for_score:.3f} "
+                              f"Fake Score: {fake_output_for_score:.3f}")
+                else:
+                    # Handle case where no fake data was generated
+                    print(f"Warning: Missing data in batch {batch_idx}")
+                    epoch_g_losses.append(1.0)
+                    epoch_d_losses.append(1.0)
+                    epoch_real_scores.append(0.5)
+                    epoch_fake_scores.append(0.5)
             
             # Record epoch statistics
             avg_g_loss = np.mean(epoch_g_losses)
