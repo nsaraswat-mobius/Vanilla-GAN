@@ -1,4 +1,4 @@
-name: Train Vanilla GAN (Balanced)
+name: Train Vanilla GAN 1
 description: Trains Vanilla GAN model with balanced training to prevent discriminator dominance
 inputs:
   - name: initialized_model
@@ -218,20 +218,38 @@ implementation:
                 x_real = real_data
                 x_fake = fake_data
                 
-                for i, layer in enumerate(self.discriminator.model[:-2]):  # Skip final sigmoid
+                # Check discriminator structure
+                if hasattr(self.discriminator, 'model'):
+                    # Old structure with .model attribute
+                    layers = self.discriminator.model
+                elif hasattr(self.discriminator, 'layers'):
+                    # New structure with .layers attribute
+                    layers = self.discriminator.layers
+                elif hasattr(self.discriminator, 'blocks'):
+                    # Forward-Forward or CAFO structure
+                    layers = self.discriminator.blocks
+                else:
+                    # Try to get the layers directly
+                    layers = list(self.discriminator.children())
+                
+                # Collect features from intermediate layers (skip final layer)
+                for i, layer in enumerate(layers[:-1]):  # Skip final sigmoid/linear
                     x_real = layer(x_real)
                     x_fake = layer(x_fake)
                     
-                    if i % 3 == 1:  # Collect features after each block (linear + norm + activation)
+                    if hasattr(layer, 'out_features') or hasattr(layer, 'out_channels'):
+                        # It's a linear or conv layer, collect features
                         real_features.append(x_real.detach())
                         fake_features.append(x_fake)
                 
                 # Compute MSE loss between real and fake features
                 fm_loss = 0
-                for real_feat, fake_feat in zip(real_features, fake_features):
-                    fm_loss += self.mse_loss(fake_feat.mean(0), real_feat.mean(0))
-                
-                return fm_loss / len(real_features)
+                if real_features and fake_features:
+                    for real_feat, fake_feat in zip(real_features, fake_features):
+                        fm_loss += self.mse_loss(fake_feat.mean(0), real_feat.mean(0))
+                    return fm_loss / len(real_features)
+                else:
+                    return torch.tensor(0.0, device=self.device)
         
         # Load model with robust error handling
         gan = None
@@ -692,8 +710,11 @@ implementation:
                     # Add feature matching loss if enabled
                     g_loss = g_loss_adversarial
                     if feature_matching:
-                        fm_loss = gan.feature_matching_loss(real_data, fake_data_for_generator)
-                        g_loss += 10.0 * fm_loss  # Weight feature matching loss
+                        try:
+                            fm_loss = gan.feature_matching_loss(real_data, fake_data_for_generator)
+                            g_loss += 10.0 * fm_loss  # Weight feature matching loss
+                        except Exception as fm_error:
+                            print(f"Feature matching error: {fm_error}, skipping...")
                     
                     g_loss.backward()
                     gan.g_optimizer.step()
