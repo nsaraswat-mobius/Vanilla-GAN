@@ -50,7 +50,6 @@ implementation:
         # =============================================================================
         
         class VanillaGANWrapper:
-            """Wrapper class to serialize/deserialize Vanilla GAN models"""
             def __init__(self, generator_state, discriminator_state, config):
                 self.generator_state = generator_state
                 self.discriminator_state = discriminator_state
@@ -58,7 +57,6 @@ implementation:
                 
             @classmethod
             def from_model(cls, model):
-                """Create wrapper from a VanillaGAN model"""
                 if hasattr(model, 'generator') and hasattr(model, 'discriminator'):
                     return cls(
                         generator_state=model.generator.state_dict(),
