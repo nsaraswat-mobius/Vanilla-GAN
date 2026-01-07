@@ -1,4 +1,4 @@
-name: Train Vanilla GAN 2
+name: Train Vanilla GAN 3
 description: Trains Vanilla GAN model with balanced training to prevent discriminator dominance
 inputs:
   - name: initialized_model
@@ -44,6 +44,28 @@ implementation:
         import io
         import math
         import traceback
+        
+        # =============================================================================
+        # DEFINE VANILLAGANWRAPPER CLASS FIRST (BEFORE ANY IMPORTS/MAIN LOGIC)
+        # =============================================================================
+        
+        class VanillaGANWrapper:
+            """Wrapper class to serialize/deserialize Vanilla GAN models"""
+            def __init__(self, generator_state, discriminator_state, config):
+                self.generator_state = generator_state
+                self.discriminator_state = discriminator_state
+                self.config = config
+                
+            @classmethod
+            def from_model(cls, model):
+                """Create wrapper from a VanillaGAN model"""
+                if hasattr(model, 'generator') and hasattr(model, 'discriminator'):
+                    return cls(
+                        generator_state=model.generator.state_dict(),
+                        discriminator_state=model.discriminator.state_dict(),
+                        config=getattr(model, 'config', {})
+                    )
+                return None
         
         # =============================================================================
         # IMPORT VANILLA GAN CLASSES FROM vanilla_gan.py 
@@ -280,7 +302,7 @@ implementation:
                     gan = BalancedVanillaGAN(model_data.generator, model_data.discriminator, config)
                     print("Converted to BalancedVanillaGAN for training")
 
-            elif hasattr(model_data, 'generator_state') and hasattr(model_data, 'discriminator_state'):
+            elif isinstance(model_data, VanillaGANWrapper) or (hasattr(model_data, 'generator_state') and hasattr(model_data, 'discriminator_state')):
                 # Model wrapper with state dicts (from VanillaGANWrapper)
                 print("Reconstructing from VanillaGANWrapper...")
                 config = model_data.config
@@ -321,11 +343,12 @@ implementation:
                 print("Successfully loaded from architecture wrapper")
             
             else:
-                print(f"Creating new balanced model...")
-                raise ValueError("Creating fallback")
+                print(f"Unknown model format: {type(model_data)}")
+                raise ValueError("Creating fallback model")
                 
         except Exception as e:
             print(f"Error loading model, creating balanced fallback: {e}")
+            traceback.print_exc()
             
             # Create a balanced fallback model
             try:
@@ -352,6 +375,7 @@ implementation:
                 
             except Exception as fallback_error:
                 print(f"Failed to create balanced fallback model: {fallback_error}")
+                traceback.print_exc()
                 raise
         
         if gan is None:
