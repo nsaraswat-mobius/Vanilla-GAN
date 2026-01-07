@@ -1,4 +1,4 @@
-name: Train Vanilla GAN 1
+name: Train Vanilla GAN 2
 description: Trains Vanilla GAN model with balanced training to prevent discriminator dominance
 inputs:
   - name: initialized_model
