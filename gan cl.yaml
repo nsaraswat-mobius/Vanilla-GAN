@@ -583,7 +583,7 @@ implementation:
             with open(args.tasks, "wb") as f:
                 pickle.dump(task_summary, f)
 
-            print(f"\nSaved continual learning tasks to {args.tasks}")
+            print(f"\\nSaved continual learning tasks to {args.tasks}")
 
         if __name__ == '__main__':
             main()
