@@ -1,5 +1,5 @@
-name: Preprocess for Vanilla GAN
-description: Preprocesses dataset for Vanilla GAN training and updates master config
+name: Preprocess for Vanilla GAN with Train/Test Split
+description: Preprocesses dataset for Vanilla GAN training and creates train/test split
 inputs:
   - name: train_data
     type: Dataset
@@ -9,8 +9,15 @@ inputs:
     type: String
     description: Master GAN configuration as JSON string
 outputs:
+  - name: train_loader
+    type: Dataset
+    description: Preprocessed training data in DataLoader format
+  - name: test_loader
+    type: Dataset
+    description: Preprocessed test data in DataLoader format
   - name: processed_data
     type: Dataset
+    description: Full processed dataset without train/test split
   - name: gan_config_base64
     type: String
     description: Updated master GAN configuration
@@ -36,6 +43,7 @@ implementation:
         import io
         import torch
         import torchvision.transforms as transforms
+        from torch.utils.data import DataLoader, random_split
         from PIL import Image
         import time
         import numpy as np
@@ -45,18 +53,18 @@ implementation:
         sys.path.insert(0, '/app/src')
         from nesy_factory.GANs.vanilla_gan import VanillaGANDataset
         
-        parser = argparse.ArgumentParser(description='Vanilla GAN Preprocessing')
+        parser = argparse.ArgumentParser(description='Vanilla GAN Preprocessing with Train/Test Split')
         parser.add_argument('--train_data', type=str, required=True, help='Path to train data')
         parser.add_argument('--dataset_info', type=str, required=True, help='Path to dataset info')
         parser.add_argument('--gan_config_json', type=str, required=True, help='Master GAN config as JSON string')
-        parser.add_argument('--processed_data', type=str, required=True, help='Output path for processed data')
+        parser.add_argument('--train_loader', type=str, required=True, help='Output path for train loader')
+        parser.add_argument('--test_loader', type=str, required=True, help='Output path for test loader')
+        parser.add_argument('--processed_data', type=str, required=True, help='Output path for full processed data')
         parser.add_argument('--gan_config_base64', type=str, required=True, help='Output path for updated GAN config (base64)')
         args = parser.parse_args()
         
-        print("VANILLA GAN PREPROCESSING STARTING")
+        print("VANILLA GAN PREPROCESSING WITH TRAIN/TEST SPLIT STARTING")
         print("="*60)
-        print(f"gan_config_json length: {len(args.gan_config_json)}")
-        print(f"gan_config_json preview: {args.gan_config_json[:200]}...")
         
         # Parse master config (JSON string)
         try:
@@ -64,7 +72,6 @@ implementation:
             print("Master GAN config parsed successfully")
         except json.JSONDecodeError as e:
             print(f"Failed to parse JSON config: {e}")
-            # Create default config for Vanilla GAN
             gan_config = {
                 'pipeline_name': 'vanilla_gan_pipeline',
                 'version': '1.0.0',
@@ -83,21 +90,20 @@ implementation:
         with open(args.dataset_info, 'rb') as f:
             dataset_info = pickle.load(f)
         
-        print(f"Train data samples: {len(train_data)}")
+        print(f"Raw train data samples: {len(train_data)}")
         
         # Force model type to vanilla_gan
         model_type = 'vanilla_gan'
         
         # Get image size from config or use smaller default for vanilla GAN
-        image_size = gan_config.get('dataset', {}).get('image_size', 28)  # Smaller default for vanilla GAN
-        channels = gan_config.get('dataset', {}).get('channels', 1)  # Default to grayscale for simplicity
+        image_size = gan_config.get('dataset', {}).get('image_size', 28)
+        channels = gan_config.get('dataset', {}).get('channels', 1)
+        test_split_ratio = gan_config.get('dataset', {}).get('test_split', 0.2)
         
         print(f"Processing for {model_type.upper()}")
         print(f"Image size: {image_size}x{image_size}")
         print(f"Channels: {channels}")
-        
-        # VanillaGANDataset is now imported from vanilla_gan.py
-        # No need to redefine the class here
+        print(f"Test split ratio: {test_split_ratio}")
         
         # Create transform specifically for Vanilla GAN
         if channels == 1:
@@ -105,57 +111,142 @@ implementation:
                 transforms.Resize(image_size),
                 transforms.CenterCrop(image_size),
                 transforms.ToTensor(),
-                transforms.Normalize((0.5,), (0.5,))  # Normalize to [-1, 1]
+                transforms.Normalize((0.5,), (0.5,))
             ])
         else:
             transform = transforms.Compose([
                 transforms.Resize(image_size),
                 transforms.CenterCrop(image_size),
                 transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Normalize to [-1, 1]
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
             ])
         
-        # Create dataset
-        dataset = VanillaGANDataset(train_data, transform, image_size, channels)
+        # Create full dataset
+        full_dataset = VanillaGANDataset(train_data, transform, image_size, channels)
+        
+        # Split into train and test
+        test_size = int(len(full_dataset) * test_split_ratio)
+        train_size = len(full_dataset) - test_size
+        
+        print(f"Splitting: {train_size} train, {test_size} test")
+        
+        train_dataset, test_dataset = random_split(
+            full_dataset, 
+            [train_size, test_size],
+            generator=torch.Generator().manual_seed(42)  # For reproducibility
+        )
+        
+        # Create DataLoaders
+        batch_size = gan_config.get('training', {}).get('batch_size', 32)
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=False
+        )
+        
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=False
+        )
         
         # Calculate input dimension for vanilla GAN (flattened)
         input_dim = image_size * image_size * channels
         print(f"Vanilla GAN input dimension (flattened): {input_dim}")
         
-        # Create data wrapper with Vanilla GAN specific information
-        data_wrapper = {
-            'dataset': dataset,
+        # Create data wrappers with proper DataLoader format
+        train_wrapper = {
+            'loader': train_loader,
+            'dataset': train_dataset,
             'model_type': model_type,
             'input_dim': input_dim,
             'image_size': image_size,
             'channels': channels,
-            'num_samples': len(dataset),
-            'is_flattened': True,  # Always True for Vanilla GAN
-            'output_shape': (channels, image_size, image_size),  # For reconstruction
-            'flat_shape': (input_dim,),  # Flattened shape
-            'data_range': [-1, 1],  # After normalization
+            'num_samples': len(train_dataset),
+            'is_flattened': True,
+            'data_range': [-1, 1],
+            'metadata': {
+                'split': 'train',
+                'samples': len(train_dataset),
+                'batch_size': batch_size,
+                'num_batches': len(train_loader)
+            }
+        }
+        
+        test_wrapper = {
+            'loader': test_loader,
+            'dataset': test_dataset,
+            'model_type': model_type,
+            'input_dim': input_dim,
+            'image_size': image_size,
+            'channels': channels,
+            'num_samples': len(test_dataset),
+            'is_flattened': True,
+            'data_range': [-1, 1],
+            'metadata': {
+                'split': 'test',
+                'samples': len(test_dataset),
+                'batch_size': batch_size,
+                'num_batches': len(test_loader)
+            }
+        }
+        
+        # Create full processed data wrapper (without split)
+        full_data_wrapper = {
+            'dataset': full_dataset,
+            'model_type': model_type,
+            'input_dim': input_dim,
+            'image_size': image_size,
+            'channels': channels,
+            'num_samples': len(full_dataset),
+            'is_flattened': True,
+            'output_shape': (channels, image_size, image_size),
+            'flat_shape': (input_dim,),
+            'data_range': [-1, 1],
             'preprocessing_info': {
                 'resize': image_size,
                 'normalize_mean': 0.5,
                 'normalize_std': 0.5,
-                'flattened': True
+                'flattened': True,
+                'train_split_ratio': 1 - test_split_ratio,
+                'test_split_ratio': test_split_ratio
             }
         }
         
-        # Save processed data
+        # Save train and test loaders
+        os.makedirs(os.path.dirname(args.train_loader) or '.', exist_ok=True)
+        with open(args.train_loader, 'wb') as f:
+            pickle.dump(train_wrapper, f)
+        print(f"Train loader saved: {args.train_loader}")
+        
+        os.makedirs(os.path.dirname(args.test_loader) or '.', exist_ok=True)
+        with open(args.test_loader, 'wb') as f:
+            pickle.dump(test_wrapper, f)
+        print(f"Test loader saved: {args.test_loader}")
+        
+        # Save full processed data
         os.makedirs(os.path.dirname(args.processed_data) or '.', exist_ok=True)
         with open(args.processed_data, 'wb') as f:
-            pickle.dump(data_wrapper, f)
-        print(f"Processed data saved: {args.processed_data}")
+            pickle.dump(full_data_wrapper, f)
+        print(f"Full processed data saved: {args.processed_data}")
         
-        # Update master config with Vanilla GAN specific settings
+        # Update master config
         gan_config['dataset'].update({
-            'processed_samples': len(dataset),
+            'train_samples': len(train_dataset),
+            'test_samples': len(test_dataset),
+            'total_samples': len(full_dataset),
             'actual_image_size': image_size,
             'actual_channels': channels,
             'input_dim': input_dim,
             'is_flattened': True,
-            'data_range': [-1, 1]
+            'data_range': [-1, 1],
+            'test_split_ratio': test_split_ratio,
+            'batch_size': batch_size
         })
         
         gan_config['model'].update({
@@ -168,13 +259,13 @@ implementation:
             'data_format': 'flattened'
         })
         
-        # Add recommended hyperparameters for Vanilla GAN
+        # Add training parameters
         if 'training' not in gan_config:
             gan_config['training'] = {}
         
         gan_config['training'].update({
             'recommended_lr': 0.0002,
-            'recommended_batch_size': 64,
+            'recommended_batch_size': batch_size,
             'recommended_epochs': 200,
             'optimizer': 'Adam',
             'loss_function': 'BCELoss',
@@ -183,12 +274,13 @@ implementation:
         
         gan_config['metadata'].update({
             'preprocessed_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
-            'preprocessing_step': 'completed',
+            'preprocessing_step': 'completed_with_split',
             'gan_variant': 'vanilla_gan',
-            'data_format': 'flattened_vectors'
+            'data_format': 'flattened_vectors',
+            'outputs_generated': ['train_loader', 'test_loader', 'processed_data']
         })
         
-        # Encode to base64 for next bricks
+        # Encode to base64
         config_json = json.dumps(gan_config, indent=2)
         config_base64 = base64.b64encode(config_json.encode('utf-8')).decode('utf-8')
         
@@ -198,12 +290,16 @@ implementation:
             f.write(config_base64)
         
         print("="*60)
-        print("Vanilla GAN Preprocessing completed successfully")
-        print(f"Processed data: {args.processed_data}")
-        print(f"Config (base64) saved: {args.gan_config_base64}")
-        print(f"Config size: {len(config_base64)} bytes")
-        print(f"Input dimension (flattened): {input_dim}")
-        print(f"Output shape: {channels}x{image_size}x{image_size}")
+        print("Vanilla GAN Preprocessing with Train/Test Split completed")
+        print(f"Train samples: {len(train_dataset)}")
+        print(f"Test samples: {len(test_dataset)}")
+        print(f"Total samples: {len(full_dataset)}")
+        print(f"Input dimension: {input_dim}")
+        print("Output files:")
+        print(f"  - Train loader: {args.train_loader}")
+        print(f"  - Test loader: {args.test_loader}")
+        print(f"  - Full processed data: {args.processed_data}")
+        print(f"  - Config (base64): {args.gan_config_base64}")
         print("="*60)
 
     args:
@@ -213,6 +309,10 @@ implementation:
       - {inputPath: dataset_info}
       - --gan_config_json
       - {inputValue: gan_config_json}
+      - --train_loader
+      - {outputPath: train_loader}
+      - --test_loader
+      - {outputPath: test_loader}
       - --processed_data
       - {outputPath: processed_data}
       - --gan_config_base64
