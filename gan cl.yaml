@@ -518,20 +518,36 @@ implementation:
                 test_loader = test_data
                 print("Loaded test data (legacy format)")
 
-            # Extract tensors from DataLoaders
-            # For GAN, we need both images and labels
-            try:
-                # Try to get both images and labels
-                X_train = train_loader.dataset.tensors[0].numpy()
-                y_train = train_loader.dataset.tensors[1].numpy() if len(train_loader.dataset.tensors) > 1 else np.zeros(len(X_train))
-                X_test = test_loader.dataset.tensors[0].numpy()
-                y_test = test_loader.dataset.tensors[1].numpy() if len(test_loader.dataset.tensors) > 1 else np.zeros(len(X_test))
-            except:
-                # Fallback: create dummy labels
-                X_train = train_loader.dataset.tensors[0].numpy()
-                y_train = np.zeros(len(X_train))
-                X_test = test_loader.dataset.tensors[0].numpy()
-                y_test = np.zeros(len(X_test))
+            # FIX: Extract data by iterating through DataLoader instead of using .tensors
+            X_train = []
+            y_train = []
+            for batch in train_loader:
+                if isinstance(batch, (list, tuple)):
+                    images, labels = batch
+                else:
+                    images = batch
+                    labels = torch.zeros(len(images))
+                
+                X_train.append(images.numpy())
+                y_train.append(labels.numpy())
+            
+            X_train = np.concatenate(X_train) if X_train else np.array([])
+            y_train = np.concatenate(y_train) if y_train else np.array([])
+            
+            X_test = []
+            y_test = []
+            for batch in test_loader:
+                if isinstance(batch, (list, tuple)):
+                    images, labels = batch
+                else:
+                    images = batch
+                    labels = torch.zeros(len(images))
+                
+                X_test.append(images.numpy())
+                y_test.append(labels.numpy())
+            
+            X_test = np.concatenate(X_test) if X_test else np.array([])
+            y_test = np.concatenate(y_test) if y_test else np.array([])
 
             print(f"Training data shape: {X_train.shape}")
             print(f"Training labels shape: {y_train.shape}")
