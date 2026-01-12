@@ -1,0 +1,634 @@
+name: Vanilla GAN RLAF Loop
+description: Triggers the DQN RLAF pipeline in a loop to optimize Vanilla GAN model hyperparameters, controlled by a pierce_or_not flag.
+inputs:
+  - {name: trained_model, type: Model}
+  - {name: init_metrics, type: Metrics}
+  - {name: data_path, type: Dataset}
+  - {name: config, type: String}
+  - {name: domain, type: String}
+  - {name: schema_id, type: String}
+  - {name: model_id, type: String}
+  - {name: dqn_pipeline_id, type: String}
+  - {name: pipeline_domain, type: String}
+  - {name: dqn_experiment_id, type: String}
+  - {name: access_token, type: string}
+  - {name: tasks, type: Dataset}
+outputs:
+  - {name: rlaf_output, type: Dataset}
+  - {name: retrained_model, type: Model}
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v23
+    command:
+      - sh
+      - -c
+      - |
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import torch
+        import torch.nn as nn
+        import torch.optim as optim
+        import os
+        import json
+        import argparse
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        import time
+        import pickle
+        import numpy as np
+        from torch.utils.data import DataLoader, TensorDataset
+        import matplotlib.pyplot as plt
+        from scipy.stats import wasserstein_distance
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+        # Generator Network
+        class Generator(nn.Module):
+            def __init__(self, config):
+                super(Generator, self).__init__()
+                
+                self.latent_dim = config['latent_dim']
+                self.output_dim = config['output_dim']
+                
+                layers = []
+                input_size = self.latent_dim
+                
+                # Generator layers
+                for hidden_size in config['g_hidden_dims']:
+                    layers.append(nn.Linear(input_size, hidden_size))
+                    layers.append(nn.LeakyReLU(config['g_leaky_relu_slope']))
+                    if config['g_dropout'] > 0:
+                        layers.append(nn.Dropout(config['g_dropout']))
+                    input_size = hidden_size
+                
+                # Output layer
+                layers.append(nn.Linear(input_size, self.output_dim))
+                layers.append(nn.Tanh())  # Output in range [-1, 1]
+                
+                self.model = nn.Sequential(*layers)
+            
+            def forward(self, z):
+                return self.model(z)
+            
+            def generate(self, num_samples, device='cpu'):
+                self.eval()
+                with torch.no_grad():
+                    z = torch.randn(num_samples, self.latent_dim).to(device)
+                    return self(z)
+
+        # Discriminator Network
+        class Discriminator(nn.Module):
+            def __init__(self, config):
+                super(Discriminator, self).__init__()
+                
+                self.input_dim = config['output_dim']
+                
+                layers = []
+                input_size = self.input_dim
+                
+                # Discriminator layers
+                for hidden_size in config['d_hidden_dims']:
+                    layers.append(nn.Linear(input_size, hidden_size))
+                    layers.append(nn.LeakyReLU(config['d_leaky_relu_slope']))
+                    if config['d_dropout'] > 0:
+                        layers.append(nn.Dropout(config['d_dropout']))
+                    input_size = hidden_size
+                
+                # Output layer
+                layers.append(nn.Linear(input_size, 1))
+                layers.append(nn.Sigmoid())  # Probability of being real
+                
+                self.model = nn.Sequential(*layers)
+            
+            def forward(self, x):
+                return self.model(x)
+
+        # Vanilla GAN Model
+        class VanillaGAN:
+            def __init__(self, config):
+                self.config = config
+                self.device = torch.device('cuda' if torch.cuda.is_available() and config.get('use_cuda', True) else 'cpu')
+                
+                # Initialize networks
+                self.generator = Generator(config).to(self.device)
+                self.discriminator = Discriminator(config).to(self.device)
+                
+                # Initialize optimizers
+                self.g_optimizer = optim.Adam(
+                    self.generator.parameters(), 
+                    lr=config['g_learning_rate'], 
+                    betas=(config.get('g_beta1', 0.5), config.get('g_beta2', 0.999))
+                )
+                self.d_optimizer = optim.Adam(
+                    self.discriminator.parameters(), 
+                    lr=config['d_learning_rate'], 
+                    betas=(config.get('d_beta1', 0.5), config.get('d_beta2', 0.999))
+                )
+                
+                # Loss function
+                self.criterion = nn.BCELoss()
+                
+                # Training history
+                self.g_losses = []
+                self.d_losses = []
+                self.metrics_history = []
+                
+            def train_step(self, real_data):
+                batch_size = real_data.size(0)
+                
+                # Labels
+                real_labels = torch.ones(batch_size, 1).to(self.device)
+                fake_labels = torch.zeros(batch_size, 1).to(self.device)
+                
+                # ---------------------
+                # Train Discriminator
+                # ---------------------
+                self.d_optimizer.zero_grad()
+                
+                # Real data loss
+                real_output = self.discriminator(real_data)
+                d_real_loss = self.criterion(real_output, real_labels)
+                
+                # Fake data loss
+                z = torch.randn(batch_size, self.config['latent_dim']).to(self.device)
+                fake_data = self.generator(z)
+                fake_output = self.discriminator(fake_data.detach())
+                d_fake_loss = self.criterion(fake_output, fake_labels)
+                
+                # Total discriminator loss
+                d_loss = d_real_loss + d_fake_loss
+                d_loss.backward()
+                self.d_optimizer.step()
+                
+                # ---------------------
+                # Train Generator
+                # ---------------------
+                self.g_optimizer.zero_grad()
+                
+                # Generate fake data
+                z = torch.randn(batch_size, self.config['latent_dim']).to(self.device)
+                fake_data = self.generator(z)
+                
+                # Generator loss (trying to fool discriminator)
+                fake_output = self.discriminator(fake_data)
+                g_loss = self.criterion(fake_output, real_labels)
+                
+                g_loss.backward()
+                self.g_optimizer.step()
+                
+                # Store losses
+                self.g_losses.append(g_loss.item())
+                self.d_losses.append(d_loss.item())
+                
+                return {
+                    'g_loss': g_loss.item(),
+                    'd_loss': d_loss.item(),
+                    'd_real_loss': d_real_loss.item(),
+                    'd_fake_loss': d_fake_loss.item()
+                }
+            
+            def train_epoch(self, data_loader):
+                self.generator.train()
+                self.discriminator.train()
+                
+                epoch_g_loss = 0
+                epoch_d_loss = 0
+                
+                for real_batch, _ in data_loader:
+                    real_batch = real_batch.to(self.device)
+                    
+                    loss_dict = self.train_step(real_batch)
+                    epoch_g_loss += loss_dict['g_loss']
+                    epoch_d_loss += loss_dict['d_loss']
+                
+                return {
+                    'g_loss': epoch_g_loss / len(data_loader),
+                    'd_loss': epoch_d_loss / len(data_loader)
+                }
+            
+            def evaluate(self, real_data_loader, num_fake_samples=1000):
+                self.generator.eval()
+                self.discriminator.eval()
+                
+                # Collect real samples
+                real_samples = []
+                for real_batch, _ in real_data_loader:
+                    real_samples.append(real_batch.cpu().numpy())
+                real_samples = np.concatenate(real_samples, axis=0)
+                
+                # Generate fake samples
+                with torch.no_grad():
+                    fake_samples = self.generator.generate(num_fake_samples, self.device).cpu().numpy()
+                
+                # Calculate metrics
+                metrics = self.calculate_metrics(real_samples, fake_samples)
+                
+                return metrics
+            
+            def calculate_metrics(self, real_data, fake_data):
+                metrics = {}
+                
+                # 1. Wasserstein Distance (approximate)
+                if len(real_data) > 0 and len(fake_data) > 0:
+                    # Sample for computational efficiency
+                    sample_size = min(1000, len(real_data), len(fake_data))
+                    real_sample = real_data[np.random.choice(len(real_data), sample_size, replace=False)]
+                    fake_sample = fake_data[np.random.choice(len(fake_data), sample_size, replace=False)]
+                    
+                    # Calculate for each feature dimension
+                    wasserstein_dists = []
+                    for i in range(real_sample.shape[1]):
+                        wd = wasserstein_distance(real_sample[:, i], fake_sample[:, i])
+                        wasserstein_dists.append(wd)
+                    
+                    metrics['avg_wasserstein_distance'] = np.mean(wasserstein_dists)
+                    metrics['std_wasserstein_distance'] = np.std(wasserstein_dists)
+                
+                # 2. Discriminator accuracy on real vs fake
+                with torch.no_grad():
+                    real_tensor = torch.FloatTensor(real_sample).to(self.device)
+                    fake_tensor = torch.FloatTensor(fake_sample).to(self.device)
+                    
+                    real_preds = self.discriminator(real_tensor).cpu().numpy()
+                    fake_preds = self.discriminator(fake_tensor).cpu().numpy()
+                    
+                    # Create labels
+                    real_labels = np.ones(len(real_preds))
+                    fake_labels = np.zeros(len(fake_preds))
+                    
+                    all_preds = np.concatenate([real_preds, fake_preds])
+                    all_labels = np.concatenate([real_labels, fake_labels])
+                    
+                    # Convert probabilities to binary predictions
+                    binary_preds = (all_preds > 0.5).astype(int)
+                    
+                    metrics['discriminator_accuracy'] = accuracy_score(all_labels, binary_preds)
+                    metrics['discriminator_precision'] = precision_score(all_labels, binary_preds)
+                    metrics['discriminator_recall'] = recall_score(all_labels, binary_preds)
+                    metrics['discriminator_f1'] = f1_score(all_labels, binary_preds)
+                
+                # 3. Generator loss (from last training step)
+                if self.g_losses:
+                    metrics['generator_loss'] = np.mean(self.g_losses[-100:])  # Last 100 steps
+                
+                # 4. Feature statistics
+                metrics['real_mean'] = np.mean(real_data, axis=0).mean()
+                metrics['fake_mean'] = np.mean(fake_data, axis=0).mean()
+                metrics['real_std'] = np.std(real_data, axis=0).mean()
+                metrics['fake_std'] = np.std(fake_data, axis=0).mean()
+                
+                # 5. Distribution difference
+                metrics['mean_difference'] = abs(metrics['real_mean'] - metrics['fake_mean'])
+                metrics['std_difference'] = abs(metrics['real_std'] - metrics['fake_std'])
+                
+                return metrics
+            
+            def save_model(self, path):
+                torch.save({
+                    'generator_state_dict': self.generator.state_dict(),
+                    'discriminator_state_dict': self.discriminator.state_dict(),
+                    'g_optimizer_state_dict': self.g_optimizer.state_dict(),
+                    'd_optimizer_state_dict': self.d_optimizer.state_dict(),
+                    'config': self.config
+                }, path)
+            
+            def load_model(self, path):
+                checkpoint = torch.load(path, map_location=self.device)
+                self.generator.load_state_dict(checkpoint['generator_state_dict'])
+                self.discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+                self.g_optimizer.load_state_dict(checkpoint['g_optimizer_state_dict'])
+                self.d_optimizer.load_state_dict(checkpoint['d_optimizer_state_dict'])
+                self.config = checkpoint['config']
+
+        # API/DB Helper Functions (same as RNN version)
+        def get_retry_session():
+            retry_strategy = Retry(
+                total=5,
+                status_forcelist=[500, 502, 503, 504],
+                backoff_factor=1
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            session = requests.Session()
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            return session
+
+        def trigger_pipeline(config, pipeline_domain, model_id, dqn_params=None):
+            http = get_retry_session()
+            url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/trigger/ml?pipelineId={config['pipeline_id']}"
+            pipeline_params = {"param_json": json.dumps(dqn_params), "model_id": model_id} if dqn_params else {"model_id": model_id}
+            payload = json.dumps({
+                "pipelineType": "ML", "containerResources": {}, "experimentId": config['experiment_id'],
+                "enableCaching": True, "parameters": pipeline_params, "version": 1
+            })
+            print(f"{payload}")
+            headers = {
+                'accept': 'application/json', 'Authorization': f"Bearer {config['access_token']}",
+                'Content-Type': 'application/json'
+            }
+            print(f"Trigger pipeline request URL: {url}, Headers: {headers}, Payload: {payload}")
+            response = http.post(url, headers=headers, data=payload, timeout=30)
+            response.raise_for_status()
+            print(f"Triggered pipeline. Status Code: {response.status_code}, Response: {response.json()}")
+            return response.json()['runId']
+
+        def get_pipeline_status(config, pipeline_domain):
+            http = get_retry_session()
+            url = f"{pipeline_domain}/bob-service-test/v1.0/pipeline/{config['pipeline_id']}/status/ml/{config['run_id']}"
+            headers = {'accept': 'application/json', 'Authorization': f"Bearer {config['access_token']}"}
+            print(f"Get pipeline status request URL: {url}, Headers: {headers}")
+            response = http.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            pipeline_status = response.json()
+            print(f"Get pipeline status. Status Code: {response.status_code}, Full response: {pipeline_status}")
+            latest_state = pipeline_status['run_details']['state_history'][-1]
+            return latest_state['state']
+
+        def get_instance(access_token, domain, schema_id, model_id):
+            http = get_retry_session()
+            url = f"{domain}/pi-entity-instances-service/v3.0/schemas/{schema_id}/instances/list"
+            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            payload = {"dbType": "TIDB", "ownedOnly": True, "filter": {"model_id": model_id}}
+            print(f"Get instance request URL: {url}, Headers: {headers}, Payload: {payload}")
+            response = http.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            print(f"Get instance. Status Code: {response.status_code}, Full response: {response.json()}")
+            return response.json()['content'][0]
+
+        def update_instance_field(access_token, domain, schema_id, model_id, field, value):
+            http = get_retry_session()
+            url = f"{domain}/pi-entity-instances-service/v2.0/schemas/{schema_id}/instances"
+            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            payload = {
+                "dbType": "TIDB",
+                "conditionalFilter": {"conditions": [{"field": "model_id", "operator": "EQUAL", "value": model_id}]},
+                "partialUpdateRequests": [{"patch": [{"operation": "REPLACE", "path": f"{field}", "value": value}]}]
+            }
+            print(f"Update instance field request - URL: {url}, Headers: {headers}, Payload: {json.dumps(payload)}")
+            headers_str = " ".join([f"-H '{k}: {v}'" for k, v in headers.items()])
+            print(f"curl -X PATCH '{url}' {headers_str} -d '{json.dumps(payload)}'")
+            response = http.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
+            response.raise_for_status()
+            print(f"Update instance field. Status Code: {response.status_code}, Full response: {response.json()}")
+            print(f"Successfully updated field '{field}' for model_id '{model_id}'")
+
+        # Core Logic Functions
+        def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, model_id, dqn_params):
+            run_id = trigger_pipeline(config, pipeline_domain, model_id, dqn_params)
+            config["run_id"] = run_id
+            while True:
+                status = get_pipeline_status(config, pipeline_domain)
+                print(f"Current DQN pipeline status: {status}")
+                if status == 'SUCCEEDED':
+                    print("DQN Pipeline execution completed.")
+                    break
+                elif status in ['FAILED', 'ERROR']:
+                    raise RuntimeError(f"DQN Pipeline failed with status {status}")
+                time.sleep(60)
+
+        def gan_retraining(action, model_path, data_path, config, tasks_path, output_model_path, previous_metrics, dqn_params):
+            # Load data
+            with open(data_path, "rb") as f:
+                data = pickle.load(f)
+            
+            with open(tasks_path, "rb") as f:
+                tasks = pickle.load(f)
+            
+            # Update config with new hyperparameters from action
+            base_config = json.loads(config)
+            base_config.update(action)
+            
+            # Prepare data loaders
+            real_data_tensor = torch.FloatTensor(data['X_train'])
+            dataset = TensorDataset(real_data_tensor, torch.zeros(len(real_data_tensor)))
+            data_loader = DataLoader(dataset, batch_size=base_config['batch_size'], shuffle=True)
+            
+            # Initialize GAN
+            gan_config = {
+                'latent_dim': base_config.get('latent_dim', 100),
+                'output_dim': real_data_tensor.shape[1],
+                'g_hidden_dims': base_config.get('g_hidden_dims', [256, 512, 256]),
+                'd_hidden_dims': base_config.get('d_hidden_dims', [512, 256, 128]),
+                'g_learning_rate': base_config.get('g_learning_rate', 0.0002),
+                'd_learning_rate': base_config.get('d_learning_rate', 0.0002),
+                'g_leaky_relu_slope': base_config.get('g_leaky_relu_slope', 0.2),
+                'd_leaky_relu_slope': base_config.get('d_leaky_relu_slope', 0.2),
+                'g_dropout': base_config.get('g_dropout', 0.3),
+                'd_dropout': base_config.get('d_dropout', 0.3),
+                'g_beta1': base_config.get('g_beta1', 0.5),
+                'd_beta1': base_config.get('d_beta1', 0.5),
+                'epochs': base_config.get('epochs', 100),
+                'batch_size': base_config['batch_size'],
+                'use_cuda': torch.cuda.is_available()
+            }
+            
+            # Initialize or load GAN
+            gan = VanillaGAN(gan_config)
+            
+            # Load existing model if available
+            if os.path.exists(model_path):
+                gan.load_model(model_path)
+                print("Loaded existing GAN model")
+            
+            # Train GAN
+            print(f"Training GAN with new hyperparameters: {action}")
+            
+            for epoch in range(gan_config['epochs']):
+                epoch_losses = gan.train_epoch(data_loader)
+                
+                if (epoch + 1) % 10 == 0:
+                    print(f"Epoch [{epoch+1}/{gan_config['epochs']}] - G Loss: {epoch_losses['g_loss']:.4f}, D Loss: {epoch_losses['d_loss']:.4f}")
+                    
+                    # Evaluate
+                    metrics = gan.evaluate(data_loader, num_fake_samples=1000)
+                    gan.metrics_history.append(metrics)
+            
+            # Final evaluation
+            final_metrics = gan.evaluate(data_loader, num_fake_samples=2000)
+            print(f"Final GAN metrics: {final_metrics}")
+            
+            # Calculate improvement score
+            improvement_score = 0
+            for param in dqn_params:
+                key = param['key']
+                sign = 1 if param['sign'] == '+' else -1
+                if key in final_metrics and key in previous_metrics:
+                    improvement = (final_metrics[key] - previous_metrics[key]) * sign
+                    improvement_score += improvement
+            
+            # Save model if improved
+            if improvement_score > 0:
+                print(f"GAN metrics improved (score: {improvement_score:.4f}). Saving model.")
+                os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
+                gan.save_model(output_model_path)
+                print(f"Saved retrained GAN to {output_model_path}")
+            else:
+                print(f"No improvement in GAN metrics (score: {improvement_score:.4f}). Model not saved.")
+                os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
+                with open(output_model_path, 'w') as f:
+                    f.write("GAN not saved due to lack of improvement.")
+            
+            return {"metrics": final_metrics, "model_path": output_model_path}
+
+        # Main Execution
+        def main():
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--trained_model', type=str, required=True)
+            parser.add_argument('--init_metrics', type=str, required=True)
+            parser.add_argument('--rlaf_output', type=str, required=True)
+            parser.add_argument('--data_path', type=str, required=True)
+            parser.add_argument('--config', type=str, required=True)
+            parser.add_argument('--domain', type=str, required=True)
+            parser.add_argument('--schema_id', type=str, required=True)
+            parser.add_argument('--model_id', type=str, required=True)
+            parser.add_argument('--dqn_pipeline_id', type=str, required=True)
+            parser.add_argument('--dqn_experiment_id', type=str, required=True)
+            parser.add_argument('--access_token', type=str, required=True)
+            parser.add_argument('--tasks', type=str, required=True)
+            parser.add_argument('--pipeline_domain', type=str, required=True)
+            parser.add_argument('--retrained_model', type=str, required=True)
+            args = parser.parse_args()
+
+            # Read access token and initial metrics
+            with open(args.access_token, 'r') as f:
+                access_token = f.read().strip()
+            
+            with open(args.init_metrics, 'r') as f:
+                current_metrics = json.load(f)
+            
+            action_id_for_next_pierce = -1
+            
+            # RLAF Loop (max 2 iterations)
+            for i in range(2):
+                print(f"RLAF Loop Iteration {i+1}")
+                
+                # Clean and prepare metrics for DQN
+                cleaned_metrics = {}
+                dqn_params = []
+                for key, value in current_metrics.items():
+                    try:
+                        cleaned_metrics[key] = float(value)
+                        # Determine sign for DQN optimization
+                        if "wasserstein" in key.lower() or "difference" in key.lower() or "loss" in key.lower():
+                            sign = "-"  # Lower is better
+                        elif "accuracy" in key.lower() or "precision" in key.lower() or "recall" in key.lower() or "f1" in key.lower():
+                            sign = "+"  # Higher is better
+                        else:
+                            sign = "-"  # Default: lower is better
+                        
+                        dqn_params.append({"key": key, "sign": sign, "mul": 1.0})
+                    except (ValueError, TypeError):
+                        print(f"Warning: Could not convert metric '{key}' with value '{value}' to float. Skipping.")
+                
+                print(f"Dynamically generated param_json for DQN: {json.dumps(dqn_params)}")
+                
+                # Get current instance and update pierce2rlaf history
+                instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
+                
+                if instance.get('pierce2rlaf'):
+                    latest_pierce2rlaf = instance['pierce2rlaf'][-1]
+                    previous_state = latest_pierce2rlaf['current_state']
+                    episode = latest_pierce2rlaf['episode']
+                else:
+                    previous_state = {key: 0.0 for key in cleaned_metrics.keys()}
+                    episode = 0
+                
+                # Create new pierce2rlaf entry
+                new_pierce2rlaf_entry = {
+                    "action_id": action_id_for_next_pierce,
+                    "previous_state": previous_state,
+                    "current_state": cleaned_metrics,
+                    "episode": episode,
+                    "timestamp": int(time.time())
+                }
+                
+                pierce2rlaf_history = instance.get("pierce2rlaf", [])
+                pierce2rlaf_history.append(new_pierce2rlaf_entry)
+                update_instance_field(access_token, args.domain, args.schema_id, args.model_id, 
+                                     "pierce2rlaf", pierce2rlaf_history)
+                
+                # Trigger DQN pipeline
+                dqn_config = {
+                    "pipeline_id": args.dqn_pipeline_id,
+                    "experiment_id": args.dqn_experiment_id,
+                    "access_token": access_token
+                }
+                
+                trigger_and_wait_for_dqn_pipeline(dqn_config, args.pipeline_domain, args.model_id, dqn_params)
+                
+                # Get DQN recommendations
+                updated_instance = get_instance(access_token, args.domain, args.schema_id, args.model_id)
+                latest_rlaf2pierce = updated_instance['rlaf2pierce'][-1]
+                
+                # Check if we should continue
+                if not latest_rlaf2pierce.get("pierce_or_not", True):
+                    print("pierce_or_not is false. Exiting loop.")
+                    break
+                
+                print(f"DQN recommendation: {latest_rlaf2pierce}")
+                
+                # Get action details
+                rlaf_actions = updated_instance.get('rlaf_actions', {}).get('actions', [])
+                action_id_for_next_pierce = latest_rlaf2pierce['action_id']
+                action_details = next((a for a in rlaf_actions if a["id"] == action_id_for_next_pierce), None)
+                
+                if not action_details:
+                    raise ValueError(f"Action with ID {action_id_for_next_pierce} not found in rlaf_actions")
+                
+                # Retrain GAN with new hyperparameters
+                print(f"DQN pipeline recommended action: {action_details}. Retraining GAN model.")
+                
+                retraining_results = gan_retraining(
+                    action_details['params'],
+                    args.trained_model,
+                    args.data_path,
+                    args.config,
+                    args.tasks,
+                    args.retrained_model,
+                    previous_state,
+                    dqn_params
+                )
+                
+                current_metrics = retraining_results["metrics"]
+            
+            # Save final results
+            os.makedirs(os.path.dirname(args.rlaf_output), exist_ok=True)
+            with open(args.rlaf_output, 'w') as f:
+                json.dump({"final_metrics": current_metrics}, f, indent=4)
+            
+            print(f"RLAF loop finished. Final parameters written to {args.rlaf_output}")
+
+        if __name__ == '__main__':
+            main()
+    args:
+      - --trained_model
+      - {inputPath: trained_model}
+      - --init_metrics
+      - {inputPath: init_metrics}
+      - --rlaf_output
+      - {outputPath: rlaf_output}
+      - --data_path
+      - {inputPath: data_path}
+      - --config
+      - {inputValue: config}
+      - --domain
+      - {inputValue: domain}
+      - --schema_id
+      - {inputValue: schema_id}
+      - --model_id
+      - {inputValue: model_id}
+      - --dqn_pipeline_id
+      - {inputValue: dqn_pipeline_id}
+      - --dqn_experiment_id
+      - {inputValue: dqn_experiment_id}
+      - --access_token
+      - {inputPath: access_token}
+      - --tasks
+      - {inputPath: tasks}
+      - --pipeline_domain
+      - {inputValue: pipeline_domain}
+      - --retrained_model
+      - {outputPath: retrained_model}
