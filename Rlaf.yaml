@@ -1,4 +1,4 @@
-name: Vanilla GAN RLAF Loop 1
+name: Vanilla GAN RLAF Loop 2
 description: Triggers the DQN RLAF pipeline in a loop to optimize Vanilla GAN model hyperparameters, controlled by a pierce_or_not flag.
 inputs:
   - {name: trained_model, type: Model}
@@ -282,8 +282,8 @@ implementation:
                         wd = wasserstein_distance(real_sample[:, i], fake_sample[:, i])
                         wasserstein_dists.append(wd)
                     
-                    metrics['avg_wasserstein_distance'] = np.mean(wasserstein_dists)
-                    metrics['std_wasserstein_distance'] = np.std(wasserstein_dists)
+                    metrics['avg_wasserstein_distance'] = float(np.mean(wasserstein_dists))
+                    metrics['std_wasserstein_distance'] = float(np.std(wasserstein_dists))
                 else:
                     metrics['avg_wasserstein_distance'] = 1.0
                     metrics['std_wasserstein_distance'] = 0.1
@@ -306,10 +306,10 @@ implementation:
                     # Convert probabilities to binary predictions
                     binary_preds = (all_preds > 0.5).astype(int)
                     
-                    metrics['discriminator_accuracy'] = accuracy_score(all_labels, binary_preds)
-                    metrics['discriminator_precision'] = precision_score(all_labels, binary_preds)
-                    metrics['discriminator_recall'] = recall_score(all_labels, binary_preds)
-                    metrics['discriminator_f1'] = f1_score(all_labels, binary_preds)
+                    metrics['discriminator_accuracy'] = float(accuracy_score(all_labels, binary_preds))
+                    metrics['discriminator_precision'] = float(precision_score(all_labels, binary_preds))
+                    metrics['discriminator_recall'] = float(recall_score(all_labels, binary_preds))
+                    metrics['discriminator_f1'] = float(f1_score(all_labels, binary_preds))
                 except:
                     metrics['discriminator_accuracy'] = 0.5
                     metrics['discriminator_precision'] = 0.5
@@ -318,19 +318,19 @@ implementation:
                 
                 # 3. Generator loss (from last training step)
                 if self.g_losses:
-                    metrics['generator_loss'] = np.mean(self.g_losses[-100:])  # Last 100 steps
+                    metrics['generator_loss'] = float(np.mean(self.g_losses[-100:]))  # Last 100 steps
                 else:
                     metrics['generator_loss'] = 1.0
                 
                 # 4. Feature statistics
-                metrics['real_mean'] = np.mean(real_data, axis=0).mean()
-                metrics['fake_mean'] = np.mean(fake_data, axis=0).mean()
-                metrics['real_std'] = np.std(real_data, axis=0).mean()
-                metrics['fake_std'] = np.std(fake_data, axis=0).mean()
+                metrics['real_mean'] = float(np.mean(real_data, axis=0).mean())
+                metrics['fake_mean'] = float(np.mean(fake_data, axis=0).mean())
+                metrics['real_std'] = float(np.std(real_data, axis=0).mean())
+                metrics['fake_std'] = float(np.std(fake_data, axis=0).mean())
                 
                 # 5. Distribution difference
-                metrics['mean_difference'] = abs(metrics['real_mean'] - metrics['fake_mean'])
-                metrics['std_difference'] = abs(metrics['real_std'] - metrics['fake_std'])
+                metrics['mean_difference'] = float(abs(metrics['real_mean'] - metrics['fake_mean']))
+                metrics['std_difference'] = float(abs(metrics['real_std'] - metrics['fake_std']))
                 
                 return metrics
             
@@ -449,7 +449,14 @@ implementation:
             for key in expected_metrics.keys():
                 if key in current_metrics:
                     try:
-                        cleaned_metrics[key] = float(current_metrics[key])
+                        # Ensure conversion to Python float
+                        value = current_metrics[key]
+                        if isinstance(value, (np.float32, np.float64, np.int32, np.int64)):
+                            cleaned_metrics[key] = float(value)
+                        elif isinstance(value, torch.Tensor):
+                            cleaned_metrics[key] = float(value.item())
+                        else:
+                            cleaned_metrics[key] = float(value)
                     except:
                         pass  # Keep default if conversion fails
             
@@ -590,9 +597,22 @@ implementation:
                 'real_std', 'fake_std', 'mean_difference', 'std_difference'
             ]
             
+            # Convert all metrics to Python native types
+            sanitized_metrics = {}
             for key in expected_metrics_keys:
-                if key not in final_metrics:
-                    final_metrics[key] = 0.0
+                if key in final_metrics:
+                    value = final_metrics[key]
+                    # Convert to Python float
+                    if isinstance(value, (np.float32, np.float64, np.int32, np.int64)):
+                        sanitized_metrics[key] = float(value)
+                    elif isinstance(value, torch.Tensor):
+                        sanitized_metrics[key] = float(value.item())
+                    else:
+                        sanitized_metrics[key] = float(value)
+                else:
+                    sanitized_metrics[key] = 0.0
+            
+            final_metrics = sanitized_metrics
             
             # Calculate improvement score using only the 13 expected metrics
             improvement_score = 0
@@ -726,10 +746,21 @@ implementation:
                 # Update current metrics with ALL 13 metrics from retraining
                 current_metrics = retraining_results["metrics"]
             
-            # Save final results
+            # Save final results - ensure JSON serializable
             os.makedirs(os.path.dirname(args.rlaf_output), exist_ok=True)
+            
+            # Convert all metrics to Python native types before saving
+            sanitized_final_metrics = {}
+            for key, value in current_metrics.items():
+                if isinstance(value, (np.float32, np.float64, np.int32, np.int64)):
+                    sanitized_final_metrics[key] = float(value)
+                elif isinstance(value, torch.Tensor):
+                    sanitized_final_metrics[key] = float(value.item())
+                else:
+                    sanitized_final_metrics[key] = float(value) if isinstance(value, (int, float)) else value
+            
             with open(args.rlaf_output, 'w') as f:
-                json.dump({"final_metrics": current_metrics}, f, indent=4)
+                json.dump({"final_metrics": sanitized_final_metrics}, f, indent=4)
             
             print(f"RLAF loop finished. Final parameters written to {args.rlaf_output}")
 
