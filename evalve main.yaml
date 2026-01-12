@@ -15,7 +15,7 @@ inputs:
     description: Master GAN configuration as JSON string
 outputs:
   - name: eval_metrics
-    type: String
+    type: Metrics
   - name: evaluation_samples
     type: Dataset
   - name: evaluation_report
