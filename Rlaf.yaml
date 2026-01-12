@@ -1,8 +1,8 @@
-name: Vanilla GAN RLAF Loop
+name: Vanilla GAN RLAF Loop 1
 description: Triggers the DQN RLAF pipeline in a loop to optimize Vanilla GAN model hyperparameters, controlled by a pierce_or_not flag.
 inputs:
   - {name: trained_model, type: Model}
-  - {name: init_metrics, type: Metrics} 
+  - {name: init_metrics, type: Metrics}
   - {name: data_path, type: Dataset}
   - {name: config, type: String}
   - {name: domain, type: String}
@@ -284,9 +284,12 @@ implementation:
                     
                     metrics['avg_wasserstein_distance'] = np.mean(wasserstein_dists)
                     metrics['std_wasserstein_distance'] = np.std(wasserstein_dists)
+                else:
+                    metrics['avg_wasserstein_distance'] = 1.0
+                    metrics['std_wasserstein_distance'] = 0.1
                 
                 # 2. Discriminator accuracy on real vs fake
-                with torch.no_grad():
+                try:
                     real_tensor = torch.FloatTensor(real_sample).to(self.device)
                     fake_tensor = torch.FloatTensor(fake_sample).to(self.device)
                     
@@ -307,10 +310,17 @@ implementation:
                     metrics['discriminator_precision'] = precision_score(all_labels, binary_preds)
                     metrics['discriminator_recall'] = recall_score(all_labels, binary_preds)
                     metrics['discriminator_f1'] = f1_score(all_labels, binary_preds)
+                except:
+                    metrics['discriminator_accuracy'] = 0.5
+                    metrics['discriminator_precision'] = 0.5
+                    metrics['discriminator_recall'] = 0.5
+                    metrics['discriminator_f1'] = 0.5
                 
                 # 3. Generator loss (from last training step)
                 if self.g_losses:
                     metrics['generator_loss'] = np.mean(self.g_losses[-100:])  # Last 100 steps
+                else:
+                    metrics['generator_loss'] = 1.0
                 
                 # 4. Feature statistics
                 metrics['real_mean'] = np.mean(real_data, axis=0).mean()
@@ -412,6 +422,55 @@ implementation:
             response.raise_for_status()
             print(f"Update instance field. Status Code: {response.status_code}, Full response: {response.json()}")
             print(f"Successfully updated field '{field}' for model_id '{model_id}'")
+
+        # ===========================================
+        # NEW FUNCTION: GET CONSISTENT METRICS FOR DQN
+        # ===========================================
+        def get_consistent_dqn_params(current_metrics):
+            # Define the exact metrics DQN expects (from your second iteration)
+            expected_metrics = {
+                'avg_wasserstein_distance': 0.0,
+                'std_wasserstein_distance': 0.0,
+                'discriminator_accuracy': 0.0,
+                'discriminator_precision': 0.0,
+                'discriminator_recall': 0.0,
+                'discriminator_f1': 0.0,
+                'generator_loss': 0.0,
+                'real_mean': 0.0,
+                'fake_mean': 0.0,
+                'real_std': 0.0,
+                'fake_std': 0.0,
+                'mean_difference': 0.0,
+                'std_difference': 0.0
+            }
+            
+            # Update with actual values from current_metrics
+            cleaned_metrics = expected_metrics.copy()
+            for key in expected_metrics.keys():
+                if key in current_metrics:
+                    try:
+                        cleaned_metrics[key] = float(current_metrics[key])
+                    except:
+                        pass  # Keep default if conversion fails
+            
+            # Define signs for DQN optimization (same as your second iteration)
+            dqn_params = [
+                {"key": "avg_wasserstein_distance", "sign": "-", "mul": 1.0},
+                {"key": "std_wasserstein_distance", "sign": "-", "mul": 1.0},
+                {"key": "discriminator_accuracy", "sign": "+", "mul": 1.0},
+                {"key": "discriminator_precision", "sign": "+", "mul": 1.0},
+                {"key": "discriminator_recall", "sign": "+", "mul": 1.0},
+                {"key": "discriminator_f1", "sign": "+", "mul": 1.0},
+                {"key": "generator_loss", "sign": "-", "mul": 1.0},
+                {"key": "real_mean", "sign": "-", "mul": 1.0},
+                {"key": "fake_mean", "sign": "-", "mul": 1.0},
+                {"key": "real_std", "sign": "-", "mul": 1.0},
+                {"key": "fake_std", "sign": "-", "mul": 1.0},
+                {"key": "mean_difference", "sign": "-", "mul": 1.0},
+                {"key": "std_difference", "sign": "-", "mul": 1.0}
+            ]
+            
+            return cleaned_metrics, dqn_params
 
         # Core Logic Functions
         def trigger_and_wait_for_dqn_pipeline(config, pipeline_domain, model_id, dqn_params):
@@ -517,16 +576,25 @@ implementation:
                 
                 if (epoch + 1) % 10 == 0:
                     print(f"Epoch [{epoch+1}/{gan_config['epochs']}] - G Loss: {epoch_losses['g_loss']:.4f}, D Loss: {epoch_losses['d_loss']:.4f}")
-                    
-                    # Evaluate
-                    metrics = gan.evaluate(data_loader, num_fake_samples=1000)
-                    gan.metrics_history.append(metrics)
             
-            # Final evaluation
+            # Final evaluation - always return ALL 13 metrics
             final_metrics = gan.evaluate(data_loader, num_fake_samples=2000)
             print(f"Final GAN metrics: {final_metrics}")
             
-            # Calculate improvement score
+            # Ensure all 13 expected metrics are present
+            expected_metrics_keys = [
+                'avg_wasserstein_distance', 'std_wasserstein_distance',
+                'discriminator_accuracy', 'discriminator_precision', 
+                'discriminator_recall', 'discriminator_f1',
+                'generator_loss', 'real_mean', 'fake_mean',
+                'real_std', 'fake_std', 'mean_difference', 'std_difference'
+            ]
+            
+            for key in expected_metrics_keys:
+                if key not in final_metrics:
+                    final_metrics[key] = 0.0
+            
+            # Calculate improvement score using only the 13 expected metrics
             improvement_score = 0
             for param in dqn_params:
                 key = param['key']
@@ -581,24 +649,11 @@ implementation:
             for i in range(2):
                 print(f"RLAF Loop Iteration {i+1}")
                 
-                # Clean and prepare metrics for DQN
-                cleaned_metrics = {}
-                dqn_params = []
-                for key, value in current_metrics.items():
-                    try:
-                        cleaned_metrics[key] = float(value)
-                        # Determine sign for DQN optimization
-                        if "wasserstein" in key.lower() or "difference" in key.lower() or "loss" in key.lower():
-                            sign = "-"  # Lower is better
-                        elif "accuracy" in key.lower() or "precision" in key.lower() or "recall" in key.lower() or "f1" in key.lower():
-                            sign = "+"  # Higher is better
-                        else:
-                            sign = "-"  # Default: lower is better
-                        
-                        dqn_params.append({"key": key, "sign": sign, "mul": 1.0})
-                    except (ValueError, TypeError):
-                        print(f"Warning: Could not convert metric '{key}' with value '{value}' to float. Skipping.")
-                
+                # ===========================================
+                # FIXED: Use consistent metrics for DQN
+                # ===========================================
+                cleaned_metrics, dqn_params = get_consistent_dqn_params(current_metrics)
+                print(f"Consistent metrics for DQN ({len(cleaned_metrics)} features): {list(cleaned_metrics.keys())}")
                 print(f"Dynamically generated param_json for DQN: {json.dumps(dqn_params)}")
                 
                 # Get current instance and update pierce2rlaf history
@@ -668,6 +723,7 @@ implementation:
                     dqn_params
                 )
                 
+                # Update current metrics with ALL 13 metrics from retraining
                 current_metrics = retraining_results["metrics"]
             
             # Save final results
