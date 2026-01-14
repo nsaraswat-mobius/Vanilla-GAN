@@ -1,4 +1,4 @@
-name: Train Vanilla GAN 7
+name: Train Vanilla GAN 6
 description: Trains Vanilla GAN model with balanced training to prevent discriminator dominance
 inputs:
   - name: initialized_model
@@ -984,7 +984,7 @@ implementation:
             }
         }
         
-        # SAVE ALL OUTPUTS AS LISTS
+        # SAVE ALL OUTPUTS
         print("\\nSaving training outputs...")
         
         # Save trained model
@@ -1010,21 +1010,19 @@ implementation:
                 pickle.dump(model_state, f)
             print(f"Model state saved: {args.trained_model}")
         
-        # Save training history AS A LIST
+        # Save training history
         os.makedirs(os.path.dirname(args.training_history), exist_ok=True)
-        history_list = [training_history]  # Wrap in list
         with open(args.training_history, 'w') as f:
-            json.dump(history_list, f, indent=2)
-        print(f"Training history saved as list: {args.training_history}")
+            json.dump(training_history, f, indent=2)
+        print(f"Training history saved: {args.training_history}")
         
-        # Save training metrics AS A LIST
+        # Save training metrics
         os.makedirs(os.path.dirname(args.training_metrics), exist_ok=True)
-        metrics_list = [training_metrics]  # Wrap in list
         with open(args.training_metrics, 'w') as f:
-            json.dump(metrics_list, f, indent=2)
-        print(f"Training metrics saved as list: {args.training_metrics}")
+            json.dump(training_metrics, f, indent=2)
+        print(f"Training metrics saved: {args.training_metrics}")
         
-        # Save generated samples (already a list, no change needed)
+        # Save generated samples
         os.makedirs(os.path.dirname(args.generated_samples), exist_ok=True)
         with open(args.generated_samples, 'wb') as f:
             pickle.dump(generated_samples, f)
