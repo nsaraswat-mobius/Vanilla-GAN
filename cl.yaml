@@ -22,7 +22,7 @@ outputs:
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v35
+    image: adityamanjunath/nesy-naman:v1
     command:
       - sh
       - -c
