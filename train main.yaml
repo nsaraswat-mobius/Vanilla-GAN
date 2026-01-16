@@ -22,7 +22,7 @@ outputs:
 
 implementation:
   container:
-    image: adityamanjunath/nesy-naman:v1
+    image: nikhilv215/nesy-factory:v23
     command:
       - python3
       - -u
