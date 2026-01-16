@@ -24,7 +24,7 @@ outputs:
 
 implementation:
   container:
-    image: adityamanjunath/nesy-naman:v1
+    image: adityamanjunath/nesy-naman:v2
     command:
       - sh
       - -c
