@@ -24,7 +24,7 @@ outputs:
 
 implementation:
   container:
-    image: adityamanjunath/nesy-naman:v2
+    image: gurpreetgandhi/nesy-factory:v38-gpu
     command:
       - sh
       - -c
@@ -48,6 +48,18 @@ implementation:
         import time
         import numpy as np
         import sys
+        # =====================================================
+        # BLOCK TORCHVISION (circular import fix)
+        # =====================================================
+        original_import = __builtins__.__import__
+        def block_torchvision(name, *args, **kwargs):
+            if "torchvision" in name:
+                import types
+                dummy = types.ModuleType(name)
+                sys.modules[name] = dummy
+                return dummy
+            return original_import(name, *args, **kwargs)
+        __builtins__.__import__ = block_torchvision
         
         # Import VanillaGANDataset from nesy_factory
         sys.path.insert(0, '/app/src')
