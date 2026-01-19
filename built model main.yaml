@@ -18,7 +18,7 @@ outputs:
 
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v23
+    image: kushagra4761/nesy-factory-gpu:t2.6
     command:
       - sh
       - -c
