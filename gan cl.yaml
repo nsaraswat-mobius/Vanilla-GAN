@@ -8,7 +8,7 @@ outputs:
   - {name: tasks, type: Dataset}
 implementation:
   container:
-    image: nikhilv215/nesy-factory:v23
+    image: kushagra4761/nesy-factory-gpu:t2.6v2
     command:
     - python3
     - -c
