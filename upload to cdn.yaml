@@ -1,4 +1,4 @@
-name: Upload Data To CDN v14 - Vanilla GAN COMPLETE SET
+name: Upload Data To CDN v1
 description: Uploads complete dataset set for Vanilla GAN pipeline continuation
 inputs:
   - name: train_loader
@@ -128,7 +128,7 @@ implementation:
         
         def check_file(file_path, file_type, description):
             if not os.path.exists(file_path):
-                print(f"✗ Missing: {file_path}")
+                print(f" Missing: {file_path}")
                 return False, 0, None
             
             file_size = os.path.getsize(file_path)
@@ -147,7 +147,7 @@ implementation:
                             model_type = obj.get('model_type', 'vanilla_gan')
                             input_dim = obj.get('input_dim', 'unknown')
                             split = obj.get('metadata', {}).get('split', 'unknown')
-                            print(f"✓ {description}: VanillaGAN {split} loader ({samples} samples, dim={input_dim}, {size_kb:.1f} KB)")
+                            print(f" {description}: VanillaGAN {split} loader ({samples} samples, dim={input_dim}, {size_kb:.1f} KB)")
                             metadata = {
                                 'type': 'vanilla_gan_loader',
                                 'samples': samples,
@@ -160,7 +160,7 @@ implementation:
                             samples = obj.get('num_samples', 'unknown')
                             input_dim = obj.get('input_dim', 'unknown')
                             image_size = obj.get('image_size', 'unknown')
-                            print(f"✓ {description}: VanillaGAN full dataset ({samples} samples, dim={input_dim}, size={image_size}, {size_kb:.1f} KB)")
+                            print(f" {description}: VanillaGAN full dataset ({samples} samples, dim={input_dim}, size={image_size}, {size_kb:.1f} KB)")
                             metadata = {
                                 'type': 'vanilla_gan_full_dataset',
                                 'samples': samples,
@@ -333,7 +333,7 @@ implementation:
             if result:
                 upload_results[tag] = result
             else:
-                print(f"✗ Failed to upload: {tag}")
+                print(f" Failed to upload: {tag}")
         
         # ============================================================================
         # Extract GAN config metadata
@@ -453,11 +453,11 @@ implementation:
                     url = f.read().strip()
                 if url and url.startswith('http'):
                     url_count += 1
-                    print(f"  ✓ {name}: URL saved")
+                    print(f"   {name}: URL saved")
                 else:
-                    print(f"  ✗ {name}: Invalid URL")
+                    print(f"   {name}: Invalid URL")
             else:
-                print(f"✗ {name}: File not created")
+                print(f" {name}: File not created")
         
         print(f"\\nURLs saved: {url_count}/{len(url_files)}")
         
@@ -469,7 +469,7 @@ implementation:
         print("=" * 80)
         print("These URLs will be sent to the Vanilla GAN training pipeline:")
         print("\\n1. FOR TRAINING (CRITICAL):")
-        print("   • train_loader_url: Flattened training data loader")
+        print("    train_loader_url: Flattened training data loader")
         print(f"     - Input dimension: {input_dim}")
         print(f"     - Training samples: {train_samples}")
         print("\\n2. FOR EVALUATION (CRITICAL):")
