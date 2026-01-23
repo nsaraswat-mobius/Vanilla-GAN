@@ -1,4 +1,4 @@
-name: Download Vanilla GAN Data From CDN v1
+name: Download Vanilla GAN Data From CDN v123
 description: Downloads Vanilla GAN dataset set from CDN for training pipeline
 inputs:
   - name: train_loader_url
