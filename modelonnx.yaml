@@ -1,0 +1,118 @@
+name: Upload Model with ONNX Data
+
+description: Upload config.pbtxt, ONNX model file, and ONNX data file to MinIO with Triton directory structure (version 1)
+
+inputs:
+  - {name: config_file, type: Model, description: "config.pbtxt file path"}
+  - {name: onnx_file, type: Model, description: "ONNX model file path"}
+  - {name: onnx_data_file, type: Model, description: "ONNX data file path (.onnx.data)"}
+  - {name: minio_bucket, type: String, description: "MinIO bucket name"}
+  - {name: model_name, type: String, description: "Model name (e.g., vanilla_gan_generator)"}
+  - {name: minio_username, type: String, description: "MinIO username"}
+  - {name: minio_password, type: String, description: "MinIO password"}
+  - {name: minio_endpoint, type: String, default: "http://minio-service.kubeflow.svc.cluster.local:9000", description: "MinIO endpoint URL"}
+
+outputs:
+  - {name: minio_path, type: String, description: "Output MinIO path"}
+
+metadata:
+  annotations:
+    author: Your Name
+    description: Uploads Vanilla GAN ONNX models with data files to MinIO
+
+implementation:
+  container:
+    image: ubuntu:22.04
+    command:
+      - sh
+      - -ex
+      - -c
+      - |
+        # Update and install wget
+        apt-get -o Acquire::ForceIPv4=true update
+        apt-get -o Acquire::ForceIPv4=true install -y wget
+
+        # Download and install MinIO client
+        wget https://dl.min.io/client/mc/release/linux-amd64/mc
+        chmod +x mc
+        mv mc /usr/local/bin/
+
+        # Set up MinIO alias with provided credentials
+        mc alias set myminio "$6" "$5" "$7"
+
+        # Check if bucket exists, if not create it
+        if ! mc ls myminio/"$3"; then
+          mc mb myminio/"$3"
+        fi
+
+        echo "Uploading files to MinIO..."
+        echo "Bucket: $3"
+        echo "Model name: $4"
+        echo "Config path: myminio/$3/$4/config.pbtxt"
+        echo "Model files path: myminio/$3/$4/1/"
+
+        # Upload config.pbtxt (outside version folder, directly in model_name/)
+        if [ -d "$0" ]; then
+          # If it's a directory, find config.pbtxt
+          CONFIG_FILE=$(find "$0" -name "config.pbtxt" -type f | head -n 1)
+          if [ -z "$CONFIG_FILE" ]; then
+            CONFIG_FILE=$(find "$0" -type f | head -n 1)
+          fi
+          echo "Uploading config file: $CONFIG_FILE"
+          mc cp "$CONFIG_FILE" "myminio/$3/$4/config.pbtxt"
+        else
+          echo "Uploading config file: $0"
+          mc cp "$0" "myminio/$3/$4/config.pbtxt"
+        fi
+
+        # Upload ONNX model file
+        if [ -d "$1" ]; then
+          # If it's a directory, find .onnx file
+          ONNX_FILE=$(find "$1" -name "*.onnx" -type f | grep -v ".onnx.data" | head -n 1)
+          echo "Uploading ONNX model: $ONNX_FILE"
+          mc cp "$ONNX_FILE" "myminio/$3/$4/1/model.onnx"
+        else
+          echo "Uploading ONNX model: $1"
+          mc cp "$1" "myminio/$3/$4/1/model.onnx"
+        fi
+
+        # Upload ONNX data file (.onnx.data)
+        if [ -d "$2" ]; then
+          # If it's a directory, find .onnx.data file
+          ONNX_DATA_FILE=$(find "$2" -name "*.onnx.data" -type f | head -n 1)
+          if [ -n "$ONNX_DATA_FILE" ]; then
+            echo "Uploading ONNX data file: $ONNX_DATA_FILE"
+            mc cp "$ONNX_DATA_FILE" "myminio/$3/$4/1/model.onnx.data"
+          else
+            echo "Warning: No .onnx.data file found in directory"
+          fi
+        else
+          if [ -f "$2" ]; then
+            echo "Uploading ONNX data file: $2"
+            mc cp "$2" "myminio/$3/$4/1/model.onnx.data"
+          fi
+        fi
+
+        # Verify uploads
+        echo ""
+        echo "Verifying uploaded files:"
+        echo "Config file:"
+        mc ls myminio/"$3/$4/" | grep config.pbtxt
+        echo ""
+        echo "Model files in version 1:"
+        mc ls myminio/"$3/$4/1/"
+
+        # Set output path
+        echo "myminio/$3/$4/" > /tmp/output.txt
+        cat /tmp/output.txt
+
+    args:
+      - {inputPath: config_file}
+      - {inputPath: onnx_file}
+      - {inputPath: onnx_data_file}
+      - {inputValue: minio_bucket}
+      - {inputValue: model_name}
+      - {inputValue: minio_endpoint}
+      - {inputValue: minio_username}
+      - {inputValue: minio_password}
+      - {outputPath: minio_path}
