@@ -1,0 +1,282 @@
+name: Vanilla GAN ONNX Converter
+description: Converts a PyTorch Vanilla GAN model to ONNX format by reading configuration from config.pbtxt file and model architecture from model.pt
+inputs:
+  - {name: model_file, type: Model, description: "Directory containing model.pt (PyTorch model)"}
+  - {name: config_file, type: Model, description: "Directory containing config.pbtxt file with model configuration"}
+  - {name: output_dir_name, type: String, default: "vanilla_gan_onnx", description: "Output directory name for ONNX models"}
+outputs:
+  - {name: onnx_models, type: Model, description: "Converted ONNX models (generator and discriminator)"}
+implementation:
+  container:
+    image: pytorch/pytorch:2.0-cuda11.8-runtime-ubuntu22.04
+    command:
+      - sh
+      - -c
+      - |
+        pip install --quiet onnx onnxruntime onnxscript || \
+        pip install --quiet onnx onnxruntime onnxscript --user
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import json
+        import os
+        import re
+        import sys
+        import torch
+        import torch.onnx
+        from torch import nn
+        import numpy as np
+        import onnx
+        import onnxruntime as ort
+        import pickle
+
+        # Define model classes
+        class VanillaGenerator(nn.Module):
+            def __init__(self, latent_dim, output_dim, hidden_layers=[256, 512, 1024]):
+                super(VanillaGenerator, self).__init__()
+                self.latent_dim = latent_dim
+                
+                layers = []
+                input_dim = latent_dim
+                
+                for hidden_dim in hidden_layers:
+                    layers.append(nn.Linear(input_dim, hidden_dim))
+                    layers.append(nn.ReLU())
+                    input_dim = hidden_dim
+                
+                layers.append(nn.Linear(input_dim, output_dim))
+                layers.append(nn.Tanh())
+                
+                self.model = nn.Sequential(*layers)
+            
+            def forward(self, z):
+                return self.model(z)
+
+        class VanillaDiscriminator(nn.Module):
+            def __init__(self, input_dim, hidden_layers=[1024, 512, 256]):
+                super(VanillaDiscriminator, self).__init__()
+                self.input_dim = input_dim
+                
+                layers = []
+                current_dim = input_dim
+                
+                for hidden_dim in hidden_layers:
+                    layers.append(nn.Linear(current_dim, hidden_dim))
+                    layers.append(nn.LeakyReLU(0.2))
+                    layers.append(nn.Dropout(0.3))
+                    current_dim = hidden_dim
+                
+                layers.append(nn.Linear(current_dim, 1))
+                layers.append(nn.Sigmoid())
+                
+                self.model = nn.Sequential(*layers)
+            
+            def forward(self, x):
+                return self.model(x.view(x.size(0), -1))
+
+        class BalancedVanillaGAN:
+            def __init__(self):
+                self.generator = None
+                self.discriminator = None
+                self.config = {}
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--model_file', type=str, required=True)
+        parser.add_argument('--config_file', type=str, required=True)
+        parser.add_argument('--output_dir_name', type=str, default='vanilla_gan_onnx')
+        parser.add_argument('--onnx_models', type=str, required=True)
+        args = parser.parse_args()
+
+        model_path = os.path.join(args.model_file, "model.pt")
+        config_path = os.path.join(args.config_file, "config.pbtxt")
+
+        if not os.path.exists(model_path):
+            print(f"ERROR: model.pt not found at {model_path}")
+            sys.exit(1)
+
+        if not os.path.exists(config_path):
+            print(f"ERROR: config.pbtxt not found at {config_path}")
+            sys.exit(1)
+
+        # =============================
+        # Parse config.pbtxt for configuration
+        # =============================
+        print("Reading config.pbtxt to extract model configuration...")
+
+        with open(config_path, "r") as f:
+            content = f.read()
+
+        # Extract key configuration parameters
+        config_dict = {
+            'latent_dim': 100,
+            'input_dim': 784,
+            'generator_layers': [256, 512, 1024],
+            'discriminator_layers': [1024, 512, 256],
+            'training_algorithm': 'backprop'
+        }
+
+        # Try to extract from config.pbtxt if available
+        latent_match = re.search(r"latent_dim:\s*(\d+)", content)
+        if latent_match:
+            config_dict['latent_dim'] = int(latent_match.group(1))
+
+        output_match = re.search(r"output_dim:\s*(\d+)", content)
+        if output_match:
+            config_dict['input_dim'] = int(output_match.group(1))
+
+        input_match = re.search(r"input_dim:\s*(\d+)", content)
+        if input_match:
+            config_dict['input_dim'] = int(input_match.group(1))
+
+        print(f"Parsed configuration: {config_dict}")
+
+        # Output directory
+        os.makedirs(args.onnx_models, exist_ok=True)
+
+        # ============================
+        # Load PyTorch model
+        # ============================
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Device: {device}")
+
+        print("Loading model...")
+        try:
+            saved_data = torch.load(model_path, map_location=device, weights_only=False)
+        except Exception as e:
+            with open(model_path, 'rb') as f:
+                saved_data = pickle.load(f)
+
+        # Extract model components
+        if hasattr(saved_data, 'generator') and hasattr(saved_data, 'discriminator'):
+            print("Detected BalancedVanillaGAN model format")
+            generator_state = saved_data.generator.state_dict()
+            discriminator_state = saved_data.discriminator.state_dict()
+            if hasattr(saved_data, 'config'):
+                config_dict.update(saved_data.config)
+        elif isinstance(saved_data, dict):
+            generator_state = saved_data.get('generator_state_dict', saved_data.get('generator_state'))
+            discriminator_state = saved_data.get('discriminator_state_dict', saved_data.get('discriminator_state'))
+            if 'config' in saved_data:
+                config_dict.update(saved_data['config'])
+
+        # Create models
+        print("Creating generator and discriminator...")
+        generator = VanillaGenerator(
+            config_dict['latent_dim'],
+            config_dict['input_dim'],
+            config_dict['generator_layers']
+        ).to(device)
+
+        discriminator = VanillaDiscriminator(
+            config_dict['input_dim'],
+            config_dict['discriminator_layers']
+        ).to(device)
+
+        # Load weights
+        generator.load_state_dict(generator_state)
+        discriminator.load_state_dict(discriminator_state)
+        generator.eval()
+        discriminator.eval()
+
+        # ============================
+        # Export to ONNX
+        # ============================
+        print("\\n" + "="*60)
+        print("Exporting Generator to ONNX...")
+        print("="*60)
+
+        z = torch.randn(1, config_dict['latent_dim']).to(device)
+        generator_path = os.path.join(args.onnx_models, "vanilla_gan_generator.onnx")
+
+        torch.onnx.export(
+            generator,
+            z,
+            generator_path,
+            export_params=True,
+            opset_version=17,
+            do_constant_folding=True,
+            input_names=['latent_vector'],
+            output_names=['generated_samples'],
+            dynamic_axes={
+                'latent_vector': {0: 'batch_size'},
+                'generated_samples': {0: 'batch_size'}
+            }
+        )
+
+        print(f" Generator saved to: {generator_path}")
+        print(f"   File size: {os.path.getsize(generator_path) / 1024 / 1024:.2f} MB")
+
+        print("\\n" + "="*60)
+        print("Exporting Discriminator to ONNX...")
+        print("="*60)
+
+        x = torch.randn(1, config_dict['input_dim']).to(device)
+        discriminator_path = os.path.join(args.onnx_models, "vanilla_gan_discriminator.onnx")
+
+        torch.onnx.export(
+            discriminator,
+            x,
+            discriminator_path,
+            export_params=True,
+            opset_version=17,
+            do_constant_folding=True,
+            input_names=['input_samples'],
+            output_names=['realism_scores'],
+            dynamic_axes={
+                'input_samples': {0: 'batch_size'},
+                'realism_scores': {0: 'batch_size'}
+            }
+        )
+
+        print(f" Discriminator saved to: {discriminator_path}")
+        print(f"   File size: {os.path.getsize(discriminator_path) / 1024 / 1024:.2f} MB")
+
+        # ============================
+        # Validate ONNX models
+        # ============================
+        print("\\n" + "="*60)
+        print("Validating ONNX models...")
+        print("="*60)
+
+        gen_model = onnx.load(generator_path)
+        onnx.checker.check_model(gen_model)
+        print(" Generator model is valid")
+
+        disc_model = onnx.load(discriminator_path)
+        onnx.checker.check_model(disc_model)
+        print(" Discriminator model is valid")
+
+        # ============================
+        # Smoke test with ONNX Runtime
+        # ============================
+        print("\\n" + "="*60)
+        print("Running ONNX Runtime smoke test...")
+        print("="*60)
+
+        gen_session = ort.InferenceSession(generator_path)
+        disc_session = ort.InferenceSession(discriminator_path)
+
+        z_test = torch.randn(2, config_dict['latent_dim']).cpu().numpy().astype(np.float32)
+        generated = gen_session.run(None, {'latent_vector': z_test})[0]
+        scores = disc_session.run(None, {'input_samples': generated.astype(np.float32)})[0]
+
+        print(f" Generated samples shape: {generated.shape}")
+        print(f" Realism scores shape: {scores.shape}")
+
+        print("\\n" + "="*60)
+        print(" CONVERSION COMPLETED SUCCESSFULLY!")
+        print("="*60)
+        print(f"\\nONNX models saved to: {args.onnx_models}/")
+
+    args:
+      - --model_file
+      - {inputPath: model_file}
+      - --config_file
+      - {inputPath: config_file}
+      - --output_dir_name
+      - {inputValue: output_dir_name}
+      - --onnx_models
+      - {outputPath: onnx_models}
