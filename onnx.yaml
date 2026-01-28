@@ -1,25 +1,22 @@
 name: Vanilla GAN ONNX Converter
-description: Converts a PyTorch Vanilla GAN model to ONNX format by reading configuration from config.pbtxt file and model architecture from model.pt
+description: Converts a PyTorch Vanilla GAN model (generator and discriminator) to ONNX format by reading configuration from a Triton config.pbtxt file.
 inputs:
-  - {name: model_file, type: Model, description: "Directory containing model.pt (PyTorch model)"}
-  - {name: config_file, type: Model, description: "Directory containing config.pbtxt file with model configuration"}
-  - {name: output_dir_name, type: String, default: "vanilla_gan_onnx", description: "Output directory name for ONNX models"}
+  - {name: model_file, type: Model, description: "Directory containing model.pt"}
+  - {name: config_file, type: Model, description: "Directory containing config.pbtxt file"}
 outputs:
-  - {name: generator_onnx, type: Model, description: "Generator ONNX model file"}
-  - {name: generator_data, type: Model, description: "Generator ONNX data file"}
-  - {name: discriminator_onnx, type: Model, description: "Discriminator ONNX model file"}
-  - {name: discriminator_data, type: Model, description: "Discriminator ONNX data file"}
-  - {name: generator_config, type: Model, description: "Generator config.pbtxt file"}
-  - {name: discriminator_config, type: Model, description: "Discriminator config.pbtxt file"}
+  - {name: generator_onnx, type: Model, description: "Converted generator ONNX model"}
+  - {name: generator_data, type: Model, description: "Generator ONNX data files (if separated)"}
+  - {name: discriminator_onnx, type: Model, description: "Converted discriminator ONNX model"}
+  - {name: discriminator_data, type: Model, description: "Discriminator ONNX data files (if separated)"}
 implementation:
   container:
-    image: pytorch/pytorch:2.0-cuda11.8-runtime-ubuntu22.04
+    image: gurpreetgandhi/nesy-factory:v25
     command:
       - sh
       - -c
       - |
-        pip install --quiet onnx onnxruntime onnxscript || \
-        pip install --quiet onnx onnxruntime onnxscript --user
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet onnx onnxruntime || \
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet onnx onnxruntime --user
         exec "$0" "$@"
       - python3
       - -u
@@ -91,13 +88,10 @@ implementation:
         parser = argparse.ArgumentParser()
         parser.add_argument('--model_file', type=str, required=True)
         parser.add_argument('--config_file', type=str, required=True)
-        parser.add_argument('--output_dir_name', type=str, default='vanilla_gan_onnx')
         parser.add_argument('--generator_onnx', type=str, required=True)
         parser.add_argument('--generator_data', type=str, required=True)
         parser.add_argument('--discriminator_onnx', type=str, required=True)
         parser.add_argument('--discriminator_data', type=str, required=True)
-        parser.add_argument('--generator_config', type=str, required=True)
-        parser.add_argument('--discriminator_config', type=str, required=True)
         args = parser.parse_args()
 
         model_path = os.path.join(args.model_file, "model.pt")
@@ -148,8 +142,6 @@ implementation:
         os.makedirs(args.generator_data, exist_ok=True)
         os.makedirs(args.discriminator_onnx, exist_ok=True)
         os.makedirs(args.discriminator_data, exist_ok=True)
-        os.makedirs(args.generator_config, exist_ok=True)
-        os.makedirs(args.discriminator_config, exist_ok=True)
 
         # ============================
         # Load PyTorch model
@@ -200,13 +192,10 @@ implementation:
         # Export to ONNX
         # ============================
         print("\\n" + "="*60)
-        print("Exporting models to ONNX...")
+        print("Exporting Generator to ONNX...")
         print("="*60)
 
-        # Export generator
-        print("\\nExporting generator...")
-        batch_size = 1
-        z = torch.randn(batch_size, config_dict['latent_dim']).to(device)
+        z = torch.randn(1, config_dict['latent_dim']).to(device)
         generator_path = os.path.join(args.generator_onnx, "vanilla_gan_generator.onnx")
 
         torch.onnx.export(
@@ -224,22 +213,24 @@ implementation:
             }
         )
 
-        print(f"  Generator saved to: {generator_path}")
-        print(f"  File size: {os.path.getsize(generator_path) / 1024 / 1024:.2f} MB")
-        
+        print(f" Generator saved to: {generator_path}")
+        print(f"   File size: {os.path.getsize(generator_path) / 1024 / 1024:.2f} MB")
+
         # Check and copy generator data file if it exists
         generator_data_src = generator_path + ".data"
         if os.path.exists(generator_data_src):
             generator_data_dst = os.path.join(args.generator_data, "vanilla_gan_generator.onnx.data")
             import shutil
             shutil.copy2(generator_data_src, generator_data_dst)
-            print(f"  Generator data file saved to: {generator_data_dst}")
+            print(f" Generator data file saved to: {generator_data_dst}")
         else:
             print("  No separate data file created (model embedded in ONNX)")
 
-        # Export discriminator
-        print("\\nExporting discriminator...")
-        x = torch.randn(batch_size, config_dict['input_dim']).to(device)
+        print("\\n" + "="*60)
+        print("Exporting Discriminator to ONNX...")
+        print("="*60)
+
+        x = torch.randn(1, config_dict['input_dim']).to(device)
         discriminator_path = os.path.join(args.discriminator_onnx, "vanilla_gan_discriminator.onnx")
 
         torch.onnx.export(
@@ -257,16 +248,16 @@ implementation:
             }
         )
 
-        print(f"  Discriminator saved to: {discriminator_path}")
-        print(f"  File size: {os.path.getsize(discriminator_path) / 1024 / 1024:.2f} MB")
-        
+        print(f" Discriminator saved to: {discriminator_path}")
+        print(f"   File size: {os.path.getsize(discriminator_path) / 1024 / 1024:.2f} MB")
+
         # Check and copy discriminator data file if it exists
         discriminator_data_src = discriminator_path + ".data"
         if os.path.exists(discriminator_data_src):
             discriminator_data_dst = os.path.join(args.discriminator_data, "vanilla_gan_discriminator.onnx.data")
             import shutil
             shutil.copy2(discriminator_data_src, discriminator_data_dst)
-            print(f"  Discriminator data file saved to: {discriminator_data_dst}")
+            print(f" Discriminator data file saved to: {discriminator_data_dst}")
         else:
             print("  No separate data file created (model embedded in ONNX)")
 
@@ -279,11 +270,11 @@ implementation:
 
         gen_model = onnx.load(generator_path)
         onnx.checker.check_model(gen_model)
-        print("  Generator model is valid")
+        print( Generator model is valid")
 
         disc_model = onnx.load(discriminator_path)
         onnx.checker.check_model(disc_model)
-        print("  Discriminator model is valid")
+        print(" Discriminator model is valid")
 
         # ============================
         # Smoke test with ONNX Runtime
@@ -294,96 +285,13 @@ implementation:
 
         gen_session = ort.InferenceSession(generator_path)
         disc_session = ort.InferenceSession(discriminator_path)
-        
-        z_test = torch.randn(4, config_dict['latent_dim']).cpu().numpy().astype(np.float32)
+
+        z_test = torch.randn(1, config_dict['latent_dim']).cpu().numpy().astype(np.float32)
         generated = gen_session.run(None, {'latent_vector': z_test})[0]
         scores = disc_session.run(None, {'input_samples': generated.astype(np.float32)})[0]
 
-        print(f"  Generated samples shape: {generated.shape}")
-        print(f"  Realism scores shape: {scores.shape}")
-
-        # ============================
-        # Create config.pbtxt files
-        # ============================
-        print("\\n" + "="*60)
-        print("Creating config.pbtxt files...")
-        print("="*60)
-
-        # Generator config
-        gen_config_content = f'''name: "vanilla_gan_generator"
-backend: "onnxruntime"
-max_batch_size: 0
-
-input [
-  {{
-    name: "latent_vector"
-    data_type: TYPE_FP32
-    dims: [-1, {config_dict['latent_dim']}]
-  }}
-]
-
-output [
-  {{
-    name: "generated_samples"
-    data_type: TYPE_FP32
-    dims: [-1, {config_dict['input_dim']}]
-  }}
-]
-
-instance_group [
-  {{
-    count: 1
-    kind: KIND_CPU
-  }}
-]
-
-dynamic_batching {{
-  preferred_batch_size: [1, 4, 8, 16]
-  max_queue_delay_microseconds: 100
-}}
-'''
-        gen_config_path = os.path.join(args.generator_config, "config.pbtxt")
-        with open(gen_config_path, 'w') as f:
-            f.write(gen_config_content)
-        print(f"  Generator config saved to: {gen_config_path}")
-
-        # Discriminator config
-        disc_config_content = f'''name: "vanilla_gan_discriminator"
-backend: "onnxruntime"
-max_batch_size: 0
-
-input [
-  {{
-    name: "input_samples"
-    data_type: TYPE_FP32
-    dims: [-1, {config_dict['input_dim']}]
-  }}
-]
-
-output [
-  {{
-    name: "realism_scores"
-    data_type: TYPE_FP32
-    dims: [-1, 1]
-  }}
-]
-
-instance_group [
-  {{
-    count: 1
-    kind: KIND_CPU
-  }}
-]
-
-dynamic_batching {{
-  preferred_batch_size: [1, 4, 8, 16]
-  max_queue_delay_microseconds: 100
-}}
-'''
-        disc_config_path = os.path.join(args.discriminator_config, "config.pbtxt")
-        with open(disc_config_path, 'w') as f:
-            f.write(disc_config_content)
-        print(f"  Discriminator config saved to: {disc_config_path}")
+        print(f" Generated samples shape: {generated.shape}")
+        print(f" Realism scores shape: {scores.shape}")
 
         print("\\n" + "="*60)
         print(" CONVERSION COMPLETED SUCCESSFULLY!")
@@ -391,17 +299,14 @@ dynamic_batching {{
         print(f"\\nOutput directories:")
         print(f"  Generator ONNX: {args.generator_onnx}/")
         print(f"  Generator Data: {args.generator_data}/")
-        print(f"  Generator Config: {args.generator_config}/")
         print(f"  Discriminator ONNX: {args.discriminator_onnx}/")
         print(f"  Discriminator Data: {args.discriminator_data}/")
-        print(f"  Discriminator Config: {args.discriminator_config}/")
+
     args:
       - --model_file
       - {inputPath: model_file}
       - --config_file
       - {inputPath: config_file}
-      - --output_dir_name
-      - {inputValue: output_dir_name}
       - --generator_onnx
       - {outputPath: generator_onnx}
       - --generator_data
@@ -410,7 +315,3 @@ dynamic_batching {{
       - {outputPath: discriminator_onnx}
       - --discriminator_data
       - {outputPath: discriminator_data}
-      - --generator_config
-      - {outputPath: generator_config}
-      - --discriminator_config
-      - {outputPath: discriminator_config}
