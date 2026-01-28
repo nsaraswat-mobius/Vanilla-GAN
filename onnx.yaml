@@ -270,7 +270,7 @@ implementation:
 
         gen_model = onnx.load(generator_path)
         onnx.checker.check_model(gen_model)
-        print( Generator model is valid")
+        print(" Generator model is valid")
 
         disc_model = onnx.load(discriminator_path)
         onnx.checker.check_model(disc_model)
