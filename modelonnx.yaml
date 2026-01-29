@@ -1,118 +1,80 @@
-name: Upload Model with ONNX Data
-
-description: Upload config.pbtxt, ONNX model file, and ONNX data file to MinIO with Triton directory structure (version 1)
-
+name: Upload Model one
+description: Upload config.pbtxt, ONNX model file, and data file to MinIO with Triton directory structure
 inputs:
-  - {name: config_file, type: Model, description: "config.pbtxt file path"}
-  - {name: onnx_file, type: Model, description: "ONNX model file path"}
-  - {name: onnx_data_file, type: Model, description: "ONNX data file path (.onnx.data)"}
-  - {name: minio_bucket, type: String, description: "MinIO bucket name"}
-  - {name: model_name, type: String, description: "Model name (e.g., vanilla_gan_generator)"}
-  - {name: minio_username, type: String, description: "MinIO username"}
-  - {name: minio_password, type: String, description: "MinIO password"}
-  - {name: minio_endpoint, type: String, default: "http://minio-service.kubeflow.svc.cluster.local:9000", description: "MinIO endpoint URL"}
-
+- {name: Config file}  # config.pbtxt file path
+- {name: ONNX file}  # ONNX model file path
+- {name: Data file}  # Data file path (will be stored in version 1 directory)
+- {name: Data file name, type: String}  # Data file name with extension (e.g., data.pkl)
+- {name: MinIO bucket name, type: String}  # MinIO bucket name
+- {name: Model name, type: String}  # Model name (e.g., mpqe)
+- {name: MinIO username, type: String}  # MinIO username
+- {name: MinIO password, type: String}  # MinIO password
 outputs:
-  - {name: minio_path, type: String, description: "Output MinIO path"}
-
+- {name: MinIO path, type: String}  # Output MinIO path
 metadata:
   annotations:
-    author: Your Name
-    description: Uploads Vanilla GAN ONNX models with data files to MinIO
-
+    author: Nikhil <nikhil.v@mobiusdtaas.ai>
 implementation:
-  container:
-    image: ubuntu:22.04
-    command:
-      - sh
-      - -ex
-      - -c
-      - |
-        # Update and install wget
-        apt-get -o Acquire::ForceIPv4=true update
-        apt-get -o Acquire::ForceIPv4=true install -y wget
-
-        # Download and install MinIO client
-        wget https://dl.min.io/client/mc/release/linux-amd64/mc
-        chmod +x mc
-        mv mc /usr/local/bin/
-
-        # Set up MinIO alias with provided credentials
-        mc alias set myminio "$5" "$6" "$7"
-
-        # Check if bucket exists, if not create it
-        if ! mc ls myminio/"$3"; then
-          mc mb myminio/"$3"
-        fi
-
-        echo "Uploading files to MinIO..."
-        echo "Bucket: $3"
-        echo "Model name: $4"
-        echo "Config path: myminio/$3/$4/config.pbtxt"
-        echo "Model files path: myminio/$3/$4/1/"
-
-        # Upload config.pbtxt (outside version folder, directly in model_name/)
-        if [ -d "$0" ]; then
-          # If it's a directory, find config.pbtxt
-          CONFIG_FILE=$(find "$0" -name "config.pbtxt" -type f | head -n 1)
-          if [ -z "$CONFIG_FILE" ]; then
-            CONFIG_FILE=$(find "$0" -type f | head -n 1)
-          fi
-          echo "Uploading config file: $CONFIG_FILE"
-          mc cp "$CONFIG_FILE" "myminio/$3/$4/config.pbtxt"
-        else
-          echo "Uploading config file: $0"
-          mc cp "$0" "myminio/$3/$4/config.pbtxt"
-        fi
-
-        # Upload ONNX model file
-        if [ -d "$1" ]; then
-          # If it's a directory, find .onnx file
-          ONNX_FILE=$(find "$1" -name "*.onnx" -type f | grep -v ".onnx.data" | head -n 1)
-          echo "Uploading ONNX model: $ONNX_FILE"
-          mc cp "$ONNX_FILE" "myminio/$3/$4/1/model.onnx"
-        else
-          echo "Uploading ONNX model: $1"
-          mc cp "$1" "myminio/$3/$4/1/model.onnx"
-        fi
-
-        # Upload ONNX data file (.onnx.data)
-        if [ -d "$2" ]; then
-          # If it's a directory, find .onnx.data file
-          ONNX_DATA_FILE=$(find "$2" -name "*.onnx.data" -type f | head -n 1)
-          if [ -n "$ONNX_DATA_FILE" ]; then
-            echo "Uploading ONNX data file: $ONNX_DATA_FILE"
-            mc cp "$ONNX_DATA_FILE" "myminio/$3/$4/1/model.onnx.data"
-          else
-            echo "Warning: No .onnx.data file found in directory"
-          fi
-        else
-          if [ -f "$2" ]; then
-            echo "Uploading ONNX data file: $2"
-            mc cp "$2" "myminio/$3/$4/1/model.onnx.data"
-          fi
-        fi
-
-        # Verify uploads
-        echo ""
-        echo "Verifying uploaded files:"
-        echo "Config file:"
-        mc ls myminio/"$3/$4/" | grep config.pbtxt
-        echo ""
-        echo "Model files in version 1:"
-        mc ls myminio/"$3/$4/1/"
-
-        # Set output path
-        echo "myminio/$3/$4/" > /tmp/output.txt
-        cat /tmp/output.txt
-
-    args:
-      - {inputPath: config_file}
-      - {inputPath: onnx_file}
-      - {inputPath: onnx_data_file}
-      - {inputValue: minio_bucket}
-      - {inputValue: model_name}
-      - {inputValue: minio_endpoint}
-      - {inputValue: minio_username}
-      - {inputValue: minio_password}
-      - {outputPath: minio_path}
+    container:
+        image: ubuntu:22.04
+        command:
+        - sh
+        - -ex
+        - -c
+        - |
+            # Update and install wget
+            apt-get -o Acquire::ForceIPv4=true update
+            apt-get -o Acquire::ForceIPv4=true install -y wget
+            
+            # Download and install MinIO client
+            wget https://dl.min.io/client/mc/release/linux-amd64/mc
+            chmod +x mc
+            mv mc /usr/local/bin/
+            
+            # Set up MinIO alias with provided credentials
+            mc alias set myminio http://minio-service.kubeflow.svc.cluster.local:9000 "$6" "$7"
+            
+            # Check if bucket exists, if not create it
+            if ! mc ls myminio/"$4"; then
+              mc mb myminio/"$4"
+            fi
+            
+            # Handle config file - check if it's a directory or file
+            if [ -d "$0" ]; then
+              # If it's a directory, copy the first file found
+              CONFIG_FILE=$(find "$0" -type f | head -n 1)
+              mc cp "$CONFIG_FILE" "myminio/$4/$5/config.pbtxt"
+            else
+              mc cp "$0" "myminio/$4/$5/config.pbtxt"
+            fi
+            
+            # Handle ONNX file - check if it's a directory or file
+            if [ -d "$1" ]; then
+              # If it's a directory, copy the first file found
+              ONNX_FILE=$(find "$1" -type f | head -n 1)
+              mc cp "$ONNX_FILE" "myminio/$4/$5/1/model.onnx"
+            else
+              mc cp "$1" "myminio/$4/$5/1/model.onnx"
+            fi
+            
+            # Handle Data file - check if it's a directory or file
+            if [ -d "$2" ]; then
+              # If it's a directory, copy the first file found
+              DATA_FILE=$(find "$2" -type f | head -n 1)
+              mc cp "$DATA_FILE" "myminio/$4/$5/1/$3"
+            else
+              mc cp "$2" "myminio/$4/$5/1/$3"
+            fi
+            
+            # Create output directory and save the MinIO path
+            mkdir -p "$(dirname "$8")"
+            echo "s3://$4/" > "$8"
+        - inputPath: Config file
+        - inputPath: ONNX file
+        - inputPath: Data file
+        - inputValue: Data file name
+        - inputValue: MinIO bucket name
+        - inputValue: Model name
+        - inputValue: MinIO username
+        - inputValue: MinIO password
+        - outputPath: MinIO path
