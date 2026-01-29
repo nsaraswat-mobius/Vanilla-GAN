@@ -237,7 +237,7 @@ implementation:
             # Create a placeholder file if no data file was generated
             placeholder_path = os.path.join(args.generator_data, "no_data_file_generated.txt")
             with open(placeholder_path, 'w') as f:
-                f.write("Model weights are embedded in the ONNX file\n")
+                f.write("Model weights are embedded in the ONNX file\\n")
                 f.write("No external .data file was created\\n")
             print(f" Created placeholder file at: {placeholder_path}")
 
