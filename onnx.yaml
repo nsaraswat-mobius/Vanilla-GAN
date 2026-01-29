@@ -34,6 +34,8 @@ implementation:
         import onnx
         import onnxruntime as ort
         import pickle
+        import shutil
+        from pathlib import Path
 
         # Define model classes
         class VanillaGenerator(nn.Module):
@@ -198,6 +200,7 @@ implementation:
         z = torch.randn(1, config_dict['latent_dim']).to(device)
         generator_path = os.path.join(args.generator_onnx, "vanilla_gan_generator.onnx")
 
+        # Use external data format to ensure .data file is created
         torch.onnx.export(
             generator,
             z,
@@ -210,21 +213,33 @@ implementation:
             dynamic_axes={
                 'latent_vector': {0: 'batch_size'},
                 'generated_samples': {0: 'batch_size'}
-            }
+            },
+            # Force external data format
+            training=torch.onnx.TrainingMode.EVAL,
+            # Enable external data to ensure .data file creation
+            use_external_data_format=True
         )
 
         print(f" Generator saved to: {generator_path}")
         print(f"   File size: {os.path.getsize(generator_path) / 1024 / 1024:.2f} MB")
 
-        # Check and copy generator data file if it exists
-        generator_data_src = generator_path + ".data"
-        if os.path.exists(generator_data_src):
-            generator_data_dst = os.path.join(args.generator_data, "vanilla_gan_generator.onnx.data")
-            import shutil
-            shutil.copy2(generator_data_src, generator_data_dst)
-            print(f" Generator data file saved to: {generator_data_dst}")
+        # Check for and move generator data file
+        generator_dir = Path(args.generator_onnx)
+        data_files = list(generator_dir.glob("*.onnx.data"))
+        
+        if data_files:
+            # Move data file to generator_data directory
+            for data_file in data_files:
+                data_dst = os.path.join(args.generator_data, data_file.name)
+                shutil.move(str(data_file), data_dst)
+                print(f" Generator data file moved to: {data_dst}")
         else:
-            print("  No separate data file created (model embedded in ONNX)")
+            # Create a placeholder file if no data file was generated
+            placeholder_path = os.path.join(args.generator_data, "no_data_file_generated.txt")
+            with open(placeholder_path, 'w') as f:
+                f.write("Model weights are embedded in the ONNX file\n")
+                f.write("No external .data file was created\n")
+            print(f" Created placeholder file at: {placeholder_path}")
 
         print("\\n" + "="*60)
         print("Exporting Discriminator to ONNX...")
@@ -233,6 +248,7 @@ implementation:
         x = torch.randn(1, config_dict['input_dim']).to(device)
         discriminator_path = os.path.join(args.discriminator_onnx, "vanilla_gan_discriminator.onnx")
 
+        # Use external data format to ensure .data file is created
         torch.onnx.export(
             discriminator,
             x,
@@ -245,21 +261,33 @@ implementation:
             dynamic_axes={
                 'input_samples': {0: 'batch_size'},
                 'realism_scores': {0: 'batch_size'}
-            }
+            },
+            # Force external data format
+            training=torch.onnx.TrainingMode.EVAL,
+            # Enable external data to ensure .data file creation
+            use_external_data_format=True
         )
 
         print(f" Discriminator saved to: {discriminator_path}")
         print(f"   File size: {os.path.getsize(discriminator_path) / 1024 / 1024:.2f} MB")
 
-        # Check and copy discriminator data file if it exists
-        discriminator_data_src = discriminator_path + ".data"
-        if os.path.exists(discriminator_data_src):
-            discriminator_data_dst = os.path.join(args.discriminator_data, "vanilla_gan_discriminator.onnx.data")
-            import shutil
-            shutil.copy2(discriminator_data_src, discriminator_data_dst)
-            print(f" Discriminator data file saved to: {discriminator_data_dst}")
+        # Check for and move discriminator data file
+        discriminator_dir = Path(args.discriminator_onnx)
+        data_files = list(discriminator_dir.glob("*.onnx.data"))
+        
+        if data_files:
+            # Move data file to discriminator_data directory
+            for data_file in data_files:
+                data_dst = os.path.join(args.discriminator_data, data_file.name)
+                shutil.move(str(data_file), data_dst)
+                print(f" Discriminator data file moved to: {data_dst}")
         else:
-            print("  No separate data file created (model embedded in ONNX)")
+            # Create a placeholder file if no data file was generated
+            placeholder_path = os.path.join(args.discriminator_data, "no_data_file_generated.txt")
+            with open(placeholder_path, 'w') as f:
+                f.write("Model weights are embedded in the ONNX file\n")
+                f.write("No external .data file was created\n")
+            print(f" Created placeholder file at: {placeholder_path}")
 
         # ============================
         # Validate ONNX models
@@ -293,6 +321,38 @@ implementation:
         print(f" Generated samples shape: {generated.shape}")
         print(f" Realism scores shape: {scores.shape}")
 
+        # ============================
+        # Ensure output directories have content
+        # ============================
+        print("\\n" + "="*60)
+        print("Verifying output artifacts...")
+        print("="*60)
+
+        # Create manifest files for Kubeflow
+        def create_manifest_file(output_dir, model_name):
+            manifest_path = os.path.join(output_dir, "MANIFEST")
+            with open(manifest_path, 'w') as f:
+                f.write(f"Artifacts for {model_name}\\n")
+                f.write(f"Generated at: {datetime.datetime.now().isoformat()}\\n")
+                
+                # List all files in directory
+                for root, dirs, files in os.walk(output_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(file_path, output_dir)
+                        file_size = os.path.getsize(file_path)
+                        f.write(f"{rel_path}: {file_size} bytes\\n")
+            print(f"  Created manifest file at: {manifest_path}")
+
+        # Import datetime for manifest file
+        import datetime
+        
+        # Create manifest files for all output directories
+        create_manifest_file(args.generator_onnx, "Generator ONNX")
+        create_manifest_file(args.generator_data, "Generator Data")
+        create_manifest_file(args.discriminator_onnx, "Discriminator ONNX")
+        create_manifest_file(args.discriminator_data, "Discriminator Data")
+
         print("\\n" + "="*60)
         print(" CONVERSION COMPLETED SUCCESSFULLY!")
         print("="*60)
@@ -301,6 +361,26 @@ implementation:
         print(f"  Generator Data: {args.generator_data}/")
         print(f"  Discriminator ONNX: {args.discriminator_onnx}/")
         print(f"  Discriminator Data: {args.discriminator_data}/")
+
+        # List contents of each directory
+        print("\\nContents:")
+        for dir_name, dir_path in [
+            ("Generator ONNX", args.generator_onnx),
+            ("Generator Data", args.generator_data),
+            ("Discriminator ONNX", args.discriminator_onnx),
+            ("Discriminator Data", args.discriminator_data)
+        ]:
+            print(f"\\n{dir_name} ({dir_path}):")
+            if os.path.exists(dir_path):
+                for item in os.listdir(dir_path):
+                    item_path = os.path.join(dir_path, item)
+                    if os.path.isfile(item_path):
+                        size = os.path.getsize(item_path)
+                        print(f"  - {item} ({size / 1024:.2f} KB)")
+                    else:
+                        print(f"  - {item}/ (directory)")
+            else:
+                print(f"  Directory does not exist!")
 
     args:
       - --model_file
