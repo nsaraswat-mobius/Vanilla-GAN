@@ -215,7 +215,7 @@ implementation:
                 'generated_samples': {0: 'batch_size'}
             },
             # Force external data format
-            training=torch.onnx.TrainingMode.EVAL,
+            training=torch.onnx.TrainingMode.EVAL
         )
 
         print(f" Generator saved to: {generator_path}")
@@ -261,9 +261,7 @@ implementation:
                 'realism_scores': {0: 'batch_size'}
             },
             # Force external data format
-            training=torch.onnx.TrainingMode.EVAL,
-            # Enable external data to ensure .data file creation
-            use_external_data_format=True
+            training=torch.onnx.TrainingMode.EVAL
         )
 
         print(f" Discriminator saved to: {discriminator_path}")
