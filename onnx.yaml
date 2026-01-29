@@ -216,8 +216,6 @@ implementation:
             },
             # Force external data format
             training=torch.onnx.TrainingMode.EVAL,
-            # Enable external data to ensure .data file creation
-            use_external_data_format=True
         )
 
         print(f" Generator saved to: {generator_path}")
