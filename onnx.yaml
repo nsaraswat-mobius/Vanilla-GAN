@@ -1,4 +1,4 @@
-name: Vanilla GAN ONNX Converter 1
+name: Vanilla GAN ONNX Converter 2
 description: Converts a PyTorch Vanilla GAN model (generator and discriminator) to ONNX format by reading configuration from a Triton config.pbtxt file.
 inputs:
   - {name: model_file, type: Model, description: "Directory containing model.pt"}
