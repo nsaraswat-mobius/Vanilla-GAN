@@ -38,7 +38,7 @@ implementation:
         mv mc /usr/local/bin/
 
         # Set up MinIO alias with provided credentials
-        mc alias set myminio "$6" "$5" "$7"
+        mc alias set myminio "$5" "$6" "$7"
 
         # Check if bucket exists, if not create it
         if ! mc ls myminio/"$3"; then
