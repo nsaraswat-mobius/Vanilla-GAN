@@ -89,9 +89,6 @@ implementation:
                 self.config = {}
 
         def export_to_onnx_with_external_data(model, dummy_input, output_path, input_names, output_names, dynamic_axes):
-            """
-            Export model to ONNX with proper external data handling
-            """
             # First export to a temporary location
             temp_path = output_path + ".tmp"
             
