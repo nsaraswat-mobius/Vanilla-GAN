@@ -61,9 +61,8 @@ implementation:
             mock_classes = ['DCGAN', 'DCGANConfig', 'DCGANLayerConfig', 'ActivationConfig',
                           'DCGANGenerator', 'DCGANDiscriminator', 'GeneratorConfig', 'DiscriminatorConfig',
                           'TrainingAlgorithm', 'TrainingConfig', 'LearningRateSchedule',
-                          'OptimizerConfig', 'LossFunction', 'DataConfig', 'GeneratorBlock',
-                          'DiscriminatorBlock', 'ConvolutionalLayer', 'BatchNormLayer',
-                          'ActivationLayer', 'LinearLayer', 'DropoutLayer', 'PoolingLayer']
+                          'BlockTrainingConfig', 'BalancedTrainingConfig', 'LossConfig',
+                          'OptimizerConfig', 'AdversarialTrainingConfig', 'DatasetConfig']
             
             for cls_name in mock_classes:
                 setattr(dcgan_module, cls_name, create_mock_class(cls_name))
