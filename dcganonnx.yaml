@@ -10,7 +10,7 @@ outputs:
   - {name: discriminator_data, type: Model, description: "Discriminator ONNX data files (if separated)"}
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v25
+    image: deepak0147/nessy-facotry:0.0.9
     command:
       - sh
       - -c
