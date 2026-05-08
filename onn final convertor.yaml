@@ -1,0 +1,631 @@
+name: DCGAN ONNX Converter
+description: Converts a PyTorch DCGAN model (generator and discriminator) to ONNX format by reading configuration from a Triton config.pbtxt file.
+inputs:
+  - {name: model_file, type: Model, description: "Directory containing model.pt"}
+  - {name: config_file, type: Model, description: "Directory containing config.pbtxt file"}
+outputs:
+  - {name: generator_onnx, type: Model, description: "Converted generator ONNX model"}
+  - {name: generator_data, type: Model, description: "Generator ONNX data files (if separated)"}
+  - {name: discriminator_onnx, type: Model, description: "Converted discriminator ONNX model"}
+  - {name: discriminator_data, type: Model, description: "Discriminator ONNX data files (if separated)"}
+implementation:
+  container:
+    image: deepak0147/nessy-facotry:0.0.9
+    command:
+      - sh
+      - -c
+      - |
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet onnx onnxruntime || \
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet onnx onnxruntime --user
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import json
+        import os
+        import re
+        import sys
+        import torch
+        import torch.onnx
+        from torch import nn
+        import numpy as np
+        import onnx
+        import onnxruntime as ort
+        import pickle
+        import shutil
+        import datetime
+        import types
+        from pathlib import Path
+        import traceback
+
+        # ============================
+        # Mock nesy_factory modules
+        # ============================
+        def create_mock_class(name):
+            return type(name, (), {'__init__': lambda self, *args, **kwargs: None})
+
+        if 'nesy_factory' not in sys.modules:
+            nesy_factory = types.ModuleType('nesy_factory')
+            sys.modules['nesy_factory'] = nesy_factory
+            
+            gans_module = types.ModuleType('nesy_factory.GANs')
+            sys.modules['nesy_factory.GANs'] = gans_module
+            nesy_factory.GANs = gans_module
+            
+            dcgan_module = types.ModuleType('nesy_factory.GANs.dcgan')
+            sys.modules['nesy_factory.GANs.dcgan'] = dcgan_module
+            gans_module.dcgan = dcgan_module
+            
+            # Mock all necessary classes
+            mock_classes = ['DCGAN', 'DCGANConfig', 'DCGANLayerConfig', 'ActivationConfig',
+                          'DCGANGenerator', 'DCGANDiscriminator', 'GeneratorConfig', 'DiscriminatorConfig',
+                          'TrainingAlgorithm', 'TrainingConfig', 'LearningRateSchedule',
+                          'BlockTrainingConfig', 'BalancedTrainingConfig', 'LossConfig',
+                          'OptimizerConfig', 'AdversarialTrainingConfig', 'DatasetConfig']
+            
+            for cls_name in mock_classes:
+                setattr(dcgan_module, cls_name, create_mock_class(cls_name))
+
+        # ============================
+        # Define DCGAN model classes
+        # ============================
+        class GeneratorBlock(nn.Module):
+            def __init__(self, in_channels, out_channels, kernel_size=4, stride=2, padding=1, 
+                         use_batchnorm=True, activation='leaky_relu'):
+                super(GeneratorBlock, self).__init__()
+                self.conv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride, padding, bias=True)
+                self.bn = nn.BatchNorm2d(out_channels) if use_batchnorm else nn.Identity()
+                self.activation = nn.LeakyReLU(0.2, inplace=True) if activation == 'leaky_relu' else nn.ReLU(inplace=True)
+            
+            def forward(self, x):
+                x = self.conv(x)
+                x = self.bn(x)
+                x = self.activation(x)
+                return x
+
+        class DCGANGenerator(nn.Module):
+            def __init__(self, latent_dim=100, channels=1, image_size=64):
+                super(DCGANGenerator, self).__init__()
+                self.latent_dim = latent_dim
+                self.channels = channels
+                self.image_size = image_size
+                self.init_size = 2
+                self.feature_maps = 256
+                
+                # FC layer
+                self.fc = nn.Sequential(
+                    nn.Linear(latent_dim, self.feature_maps * self.init_size * self.init_size),
+                    nn.BatchNorm1d(self.feature_maps * self.init_size * self.init_size),
+                    nn.ReLU(inplace=True)
+                )
+                
+                # Convolutional blocks
+                self.blocks = nn.ModuleList([
+                    GeneratorBlock(256, 256, 4, 2, 1, use_batchnorm=True),
+                    GeneratorBlock(256, 128, 4, 2, 1, use_batchnorm=True),
+                    GeneratorBlock(128, 64, 4, 2, 1, use_batchnorm=True),
+                    GeneratorBlock(64, 32, 4, 2, 1, use_batchnorm=True),
+                ])
+                
+                # Final block
+                final_block = nn.Module()
+                final_block.conv = nn.ConvTranspose2d(32, channels, 4, 2, 1, bias=True)
+                final_block.forward = lambda x: torch.tanh(final_block.conv(x))
+                self.blocks.append(final_block)
+            
+            def forward(self, z):
+                x = self.fc(z)
+                x = x.view(x.size(0), self.feature_maps, self.init_size, self.init_size)
+                for block in self.blocks:
+                    x = block(x)
+                return x
+
+        class DiscriminatorBlock(nn.Module):
+            def __init__(self, in_channels, out_channels, kernel_size=4, stride=2, padding=1):
+                super(DiscriminatorBlock, self).__init__()
+                self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=True)
+            
+            def forward(self, x):
+                return self.conv(x)
+
+        class DCGANDiscriminator(nn.Module):
+            def __init__(self, channels=1, image_size=64):
+                super(DCGANDiscriminator, self).__init__()
+                self.channels = channels
+                self.image_size = image_size
+                
+                self.blocks = nn.ModuleList([
+                    DiscriminatorBlock(channels, 16, 4, 2, 1),
+                    DiscriminatorBlock(16, 32, 4, 2, 1),
+                    DiscriminatorBlock(32, 64, 4, 2, 1),
+                    DiscriminatorBlock(64, 128, 4, 2, 1),
+                    DiscriminatorBlock(128, 1, 4, 1, 0),
+                ])
+                
+                self.activation = nn.LeakyReLU(0.2, inplace=True)
+                self.final_activation = nn.Sigmoid()
+            
+            def forward(self, x):
+                for i, block in enumerate(self.blocks):
+                    x = block(x)
+                    if i < len(self.blocks) - 1:
+                        x = self.activation(x)
+                x = x.view(x.size(0), -1)
+                x = self.final_activation(x)
+                return x
+
+        # ============================
+        # Export helper function (FIXED)
+        # ============================
+        def export_to_onnx_with_external_data(model, dummy_input, output_path, input_names, output_names, dynamic_axes):
+            
+            # Define the data file name based on the model
+            base_name = os.path.splitext(os.path.basename(output_path))[0]
+            data_filename = f"{base_name}.onnx.data"
+            output_dir = os.path.dirname(output_path)
+            
+            print(f"  Exporting to: {output_path}")
+            print(f"  Base name: {base_name}")
+            print(f"  Data filename: {data_filename}")
+            
+            try:
+                # First export to ONNX
+                print(f"  Starting ONNX export...")
+                torch.onnx.export(
+                    model,
+                    dummy_input,
+                    output_path,
+                    export_params=True,
+                    opset_version=17,
+                    do_constant_folding=True,
+                    input_names=input_names,
+                    output_names=output_names,
+                    dynamic_axes=dynamic_axes,
+                    verbose=False
+                )
+                
+                # Check the exported file exists and get size
+                if not os.path.exists(output_path):
+                    raise Exception(f"ONNX file was not created at {output_path}")
+                
+                file_size_bytes = os.path.getsize(output_path)
+                file_size_mb = file_size_bytes / (1024 * 1024)
+                print(f"  ONNX export completed")
+                print(f"  File size: {file_size_bytes:,} bytes ({file_size_mb:.2f} MB)")
+                
+                # Validate the model can be loaded
+                print(f"  Validating exported model...")
+                try:
+                    test_model = onnx.load(output_path)
+                    onnx.checker.check_model(test_model)
+                    print(f"  Model validation passed")
+                except Exception as e:
+                    print(f"  ERROR: Model validation failed: {e}")
+                    raise
+                
+                # If file is large, convert to external data format
+                if file_size_mb > 100:
+                    print(f"  Model exceeds 100MB, converting to external data format...")
+                    
+                    # Load the model
+                    onnx_model = onnx.load(output_path)
+                    
+                    # Save with external data
+                    print(f"  Saving with external data (location={data_filename})...")
+                    onnx.save_model(
+                        onnx_model,
+                        output_path,
+                        save_as_external_data=True,
+                        all_tensors_to_one_file=True,
+                        location=data_filename,  # Just the filename, not full path
+                        size_threshold=1024,     # 1KB threshold
+                        convert_attribute=False
+                    )
+                    
+                    # Construct the full path to the data file
+                    data_file_path = os.path.join(output_dir, data_filename)
+                    print(f"  Looking for data file at: {data_file_path}")
+                    
+                    # Verify the data file was created
+                    if os.path.exists(data_file_path):
+                        data_size_bytes = os.path.getsize(data_file_path)
+                        data_size_mb = data_size_bytes / (1024 * 1024)
+                        print(f"  External data file created: {data_filename}")
+                        print(f"  Data file size: {data_size_bytes:,} bytes ({data_size_mb:.2f} MB)")
+                        
+                        # Verify the model file size decreased
+                        new_model_size_bytes = os.path.getsize(output_path)
+                        new_model_size_mb = new_model_size_bytes / (1024 * 1024)
+                        print(f"  Model file size after extraction: {new_model_size_bytes:,} bytes ({new_model_size_mb:.2f} MB)")
+                        
+                        return data_file_path
+                    else:
+                        print(f"  WARNING: Expected data file not created at {data_file_path}")
+                        print(f"  Checking directory contents:")
+                        for item in os.listdir(output_dir):
+                            item_path = os.path.join(output_dir, item)
+                            size = os.path.getsize(item_path) if os.path.isfile(item_path) else 0
+                            print(f"    - {item}: {size:,} bytes")
+                        return None
+                else:
+                    print(f"  Model is small enough ({file_size_mb:.2f} MB), keeping weights embedded")
+                    return None
+                    
+            except Exception as e:
+                print(f"  ERROR during ONNX export: {e}")
+                traceback.print_exc()
+                raise
+
+        # ============================
+        # Parse arguments
+        # ============================
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--model_file', type=str, required=True)
+        parser.add_argument('--config_file', type=str, required=True)
+        parser.add_argument('--generator_onnx', type=str, required=True)
+        parser.add_argument('--generator_data', type=str, required=True)
+        parser.add_argument('--discriminator_onnx', type=str, required=True)
+        parser.add_argument('--discriminator_data', type=str, required=True)
+        args = parser.parse_args()
+
+        model_path = os.path.join(args.model_file, "model.pt")
+        config_path = os.path.join(args.config_file, "config.pbtxt")
+
+        print("="*60)
+        print("DCGAN ONNX CONVERTER")
+        print("="*60)
+        print(f"Model path: {model_path}")
+        print(f"Config path: {config_path}")
+        print(f"Generator ONNX output: {args.generator_onnx}")
+        print(f"Generator data output: {args.generator_data}")
+        print(f"Discriminator ONNX output: {args.discriminator_onnx}")
+        print(f"Discriminator data output: {args.discriminator_data}")
+
+        if not os.path.exists(model_path):
+            print(f"ERROR: model.pt not found at {model_path}")
+            sys.exit(1)
+
+        if not os.path.exists(config_path):
+            print(f"ERROR: config.pbtxt not found at {config_path}")
+            sys.exit(1)
+
+        # ============================
+        # Parse config.pbtxt
+        # ============================
+        print("\\n" + "="*60)
+        print("Reading config.pbtxt to extract model configuration...")
+        print("="*60)
+
+        with open(config_path, "r") as f:
+            content = f.read()
+
+        # Extract key configuration parameters
+        config_dict = {
+            'latent_dim': 100,
+            'image_size': 64,
+            'channels': 1
+        }
+
+        # Try to extract from config.pbtxt if available
+        latent_match = re.search(r"latent_dim:\s*(\d+)", content)
+        if latent_match:
+            config_dict['latent_dim'] = int(latent_match.group(1))
+
+        image_size_match = re.search(r"image_size:\s*(\d+)", content)
+        if image_size_match:
+            config_dict['image_size'] = int(image_size_match.group(1))
+
+        channels_match = re.search(r"channels:\s*(\d+)", content)
+        if channels_match:
+            config_dict['channels'] = int(channels_match.group(1))
+
+        print(f"Parsed configuration:")
+        print(f"  Latent dim: {config_dict['latent_dim']}")
+        print(f"  Image size: {config_dict['image_size']}")
+        print(f"  Channels: {config_dict['channels']}")
+
+        # Create output directories
+        os.makedirs(args.generator_onnx, exist_ok=True)
+        os.makedirs(args.generator_data, exist_ok=True)
+        os.makedirs(args.discriminator_onnx, exist_ok=True)
+        os.makedirs(args.discriminator_data, exist_ok=True)
+
+        # ============================
+        # Load PyTorch model
+        # ============================
+        print("\\n" + "="*60)
+        print("Loading PyTorch model...")
+        print("="*60)
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Device: {device}")
+
+        try:
+            saved_data = torch.load(model_path, map_location=device, weights_only=False)
+            print("Model loaded with torch.load")
+        except Exception as e:
+            print(f"torch.load failed: {e}")
+            print("Trying pickle.load...")
+            with open(model_path, 'rb') as f:
+                saved_data = pickle.load(f)
+            print("Model loaded with pickle.load")
+
+        # Extract model state dicts
+        if isinstance(saved_data, dict):
+            if 'generator' in saved_data and 'discriminator' in saved_data:
+                print("Detected DCGAN dictionary format with generator/discriminator keys")
+                generator_state = saved_data['generator']
+                discriminator_state = saved_data['discriminator']
+            elif 'generator_state_dict' in saved_data:
+                print("Detected state_dict format")
+                generator_state = saved_data['generator_state_dict']
+                discriminator_state = saved_data['discriminator_state_dict']
+            else:
+                print("ERROR: Could not find generator/discriminator in saved model")
+                print(f"Available keys: {list(saved_data.keys())}")
+                sys.exit(1)
+        else:
+            print("ERROR: Saved model is not a dictionary")
+            print(f"Type: {type(saved_data)}")
+            sys.exit(1)
+
+        # Create models
+        print("\\nCreating generator and discriminator")
+        generator = DCGANGenerator(
+            config_dict['latent_dim'],
+            config_dict['channels'],
+            config_dict['image_size']
+        ).to(device)
+
+        discriminator = DCGANDiscriminator(
+            config_dict['channels'],
+            config_dict['image_size']
+        ).to(device)
+
+        # Load weights
+        print("Loading weights into models...")
+        try:
+            generator.load_state_dict(generator_state)
+            print("Generator weights loaded")
+        except Exception as e:
+            print(f"Failed to load generator weights: {e}")
+            sys.exit(1)
+        
+        try:
+            discriminator.load_state_dict(discriminator_state)
+            print("Discriminator weights loaded")
+        except Exception as e:
+            print(f"Failed to load discriminator weights: {e}")
+            sys.exit(1)
+        
+        generator.eval()
+        discriminator.eval()
+        print("Models set to evaluation mode")
+
+        # ============================
+        # Export Generator to ONNX
+        # ============================
+        print("\\n" + "="*60)
+        print("Exporting Generator to ONNX...")
+        print("="*60)
+
+        z = torch.randn(1, config_dict['latent_dim']).to(device)
+        generator_path = os.path.join(args.generator_onnx, "model.onnx")
+
+        gen_data_file = export_to_onnx_with_external_data(
+            generator,
+            z,
+            generator_path,
+            input_names=['latent_vector'],
+            output_names=['generated_images'],
+            dynamic_axes={
+                'latent_vector': {0: 'batch_size'},
+                'generated_images': {0: 'batch_size'}
+            }
+        )
+
+        print(f"\\nGenerator saved to: {generator_path}")
+
+        # Handle generator data file
+        if gen_data_file and os.path.exists(gen_data_file):
+            data_dst = os.path.join(args.generator_data, os.path.basename(gen_data_file))
+            shutil.copy(gen_data_file, data_dst)
+            print(f"Generator data file copied to: {data_dst}")
+        else:
+            # Create a placeholder to satisfy Kubeflow output requirements
+            placeholder_path = os.path.join(args.generator_data, "no_external_data.txt")
+            with open(placeholder_path, 'w') as f:
+                f.write("Model weights are embedded in the ONNX file\\n")
+                f.write("No external .data file was created\\n")
+            print(f"Created placeholder at: {placeholder_path}")
+
+        # ============================
+        # Export Discriminator to ONNX
+        # ============================
+        print("\\n" + "="*60)
+        print("Exporting Discriminator to ONNX...")
+        print("="*60)
+
+        x = torch.randn(1, config_dict['channels'], config_dict['image_size'], config_dict['image_size']).to(device)
+        discriminator_path = os.path.join(args.discriminator_onnx, "model.onnx")
+
+        disc_data_file = export_to_onnx_with_external_data(
+            discriminator,
+            x,
+            discriminator_path,
+            input_names=['input_images'],
+            output_names=['realism_scores'],
+            dynamic_axes={
+                'input_images': {0: 'batch_size'},
+                'realism_scores': {0: 'batch_size'}
+            }
+        )
+
+        print(f"\\nDiscriminator saved to: {discriminator_path}")
+
+        # Handle discriminator data file
+        if disc_data_file and os.path.exists(disc_data_file):
+            data_dst = os.path.join(args.discriminator_data, os.path.basename(disc_data_file))
+            shutil.copy(disc_data_file, data_dst)
+            print(f"Discriminator data file copied to: {data_dst}")
+        else:
+            # Create a placeholder to satisfy Kubeflow output requirements
+            placeholder_path = os.path.join(args.discriminator_data, "no_external_data.txt")
+            with open(placeholder_path, 'w') as f:
+                f.write("Model weights are embedded in the ONNX file\\n")
+                f.write("No external .data file was created\\n")
+            print(f"Created placeholder at: {placeholder_path}")
+
+        # ============================
+        # Debug: Check what was actually created
+        # ============================
+        print("\\n" + "="*60)
+        print("DEBUG: Verifying created files...")
+        print("="*60)
+
+        print(f"\\nGenerator ONNX directory ({args.generator_onnx}):")
+        for item in sorted(os.listdir(args.generator_onnx)):
+            item_path = os.path.join(args.generator_onnx, item)
+            size = os.path.getsize(item_path) if os.path.isfile(item_path) else 0
+            print(f"  {item}: {size:,} bytes ({size/1024/1024:.2f} MB)")
+
+        print(f"\\nGenerator Data directory ({args.generator_data}):")
+        for item in sorted(os.listdir(args.generator_data)):
+            item_path = os.path.join(args.generator_data, item)
+            size = os.path.getsize(item_path) if os.path.isfile(item_path) else 0
+            print(f"  {item}: {size:,} bytes ({size/1024/1024:.2f} MB)")
+
+        print(f"\\nDiscriminator ONNX directory ({args.discriminator_onnx}):")
+        for item in sorted(os.listdir(args.discriminator_onnx)):
+            item_path = os.path.join(args.discriminator_onnx, item)
+            size = os.path.getsize(item_path) if os.path.isfile(item_path) else 0
+            print(f"  {item}: {size:,} bytes ({size/1024/1024:.2f} MB)")
+
+        print(f"\\nDiscriminator Data directory ({args.discriminator_data}):")
+        for item in sorted(os.listdir(args.discriminator_data)):
+            item_path = os.path.join(args.discriminator_data, item)
+            size = os.path.getsize(item_path) if os.path.isfile(item_path) else 0
+            print(f"  {item}: {size:,} bytes ({size/1024/1024:.2f} MB)")
+
+        # ============================
+        # Validate ONNX models
+        # ============================
+        print("\\n" + "="*60)
+        print("Validating ONNX models...")
+        print("="*60)
+
+        print("\\nValidating Generator...")
+        try:
+            gen_model = onnx.load(generator_path)
+            onnx.checker.check_model(gen_model)
+            print(f"Generator model is valid")
+            print(f"  Graph name: {gen_model.graph.name}")
+            print(f"  Inputs: {[i.name for i in gen_model.graph.input]}")
+            print(f"  Outputs: {[o.name for o in gen_model.graph.output]}")
+        except Exception as e:
+            print(f"Generator validation failed: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+
+        print("\\nValidating Discriminator")
+        try:
+            disc_model = onnx.load(discriminator_path)
+            onnx.checker.check_model(disc_model)
+            print(f"Discriminator model is valid")
+            print(f"  Graph name: {disc_model.graph.name}")
+            print(f"  Inputs: {[i.name for i in disc_model.graph.input]}")
+            print(f"  Outputs: {[o.name for o in disc_model.graph.output]}")
+        except Exception as e:
+            print(f"Discriminator validation failed: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+
+        # ============================
+        # Smoke test with ONNX Runtime
+        # ============================
+        print("\\n" + "="*60)
+        print("Running ONNX Runtime smoke test...")
+        print("="*60)
+
+        try:
+            print("Creating inference sessions...")
+            gen_session = ort.InferenceSession(generator_path)
+            disc_session = ort.InferenceSession(discriminator_path)
+            print("Sessions created successfully")
+
+            print("Running test inference...")
+            z_test = torch.randn(1, config_dict['latent_dim']).cpu().numpy().astype(np.float32)
+            generated = gen_session.run(None, {'latent_vector': z_test})[0]
+            scores = disc_session.run(None, {'input_images': generated.astype(np.float32)})[0]
+
+            print(f"Inference successful")
+            print(f"  Generated images shape: {generated.shape}")
+            print(f"  Realism scores shape: {scores.shape}")
+            print(f"  Score range: [{scores.min():.4f}, {scores.max():.4f}]")
+            print(f"  Generated image value range: [{generated.min():.4f}, {generated.max():.4f}]")
+        except Exception as e:
+            print(f"ONNX Runtime test failed: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+
+        # ============================
+        # Create manifest files
+        # ============================
+        print("\\n" + "="*60)
+        print("Creating manifest files...")
+        print("="*60)
+
+        def create_manifest_file(output_dir, model_name):
+            manifest_path = os.path.join(output_dir, "MANIFEST")
+            with open(manifest_path, 'w') as f:
+                f.write(f"Artifacts for {model_name}\\n")
+                f.write(f"Generated at: {datetime.datetime.now().isoformat()}\\n")
+                f.write(f"\nFiles:\\n")
+                
+                # List all files in directory
+                for root, dirs, files in os.walk(output_dir):
+                    for file in files:
+                        if file == "MANIFEST":
+                            continue
+                        file_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(file_path, output_dir)
+                        file_size = os.path.getsize(file_path)
+                        f.write(f"  {rel_path}: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)\\n")
+            print(f"  Created manifest: {manifest_path}")
+
+        create_manifest_file(args.generator_onnx, "Generator ONNX")
+        create_manifest_file(args.generator_data, "Generator Data")
+        create_manifest_file(args.discriminator_onnx, "Discriminator ONNX")
+        create_manifest_file(args.discriminator_data, "Discriminator Data")
+
+        # ============================
+        # Final Summary
+        # ============================
+        print("\\n" + "="*60)
+        print("CONVERSION COMPLETED SUCCESSFULLY!")
+        print("="*60)
+        print(f"\\nOutput directories:")
+        print(f"  Generator ONNX: {args.generator_onnx}/")
+        print(f"  Generator Data: {args.generator_data}/")
+        print(f"  Discriminator ONNX: {args.discriminator_onnx}/")
+        print(f"  Discriminator Data: {args.discriminator_data}/")
+
+        print("\\n" + "="*60)
+        print("Ready for Triton deployment!")
+        print("="*60)
+
+    args:
+      - --model_file
+      - {inputPath: model_file}
+      - --config_file
+      - {inputPath: config_file}
+      - --generator_onnx
+      - {outputPath: generator_onnx}
+      - --generator_data
+      - {outputPath: generator_data}
+      - --discriminator_onnx
+      - {outputPath: discriminator_onnx}
+      - --discriminator_data
+      - {outputPath: discriminator_data}
